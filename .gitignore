@@ -1,0 +1,16 @@
+# === 可执行文件 ===
+frontendAction
+IRMake
+
+# === 编译中间产物 ===
+*.o
+
+# === LLVM bitcode / IR ===
+*.bc
+*.ll
+
+# === IDE / 工具配置 ===
+.claude/
+
+# === 系统文件 ===
+*~
