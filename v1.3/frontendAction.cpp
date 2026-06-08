@@ -24,12 +24,6 @@ struct AnalysisStats {
     int ifCount = 0;
     int forCount = 0;
     int whileCount = 0;
-    int doWhileCount = 0;
-    int switchCount = 0;
-    int breakCount = 0;
-    int continueCount = 0;
-    int returnCount = 0;
-    int gotoCount = 0;
     int callCount = 0;
     std::map<std::string, int> callTargets;        // 被调用函数名 -> 调用次数
     std::vector<std::pair<std::string, int>> funcLines; // 函数名, 行数
@@ -96,42 +90,6 @@ public:
         return true;
     }
 
-    // do-while 语句
-    bool VisitDoStmt(DoStmt *DS) {
-        Stats.doWhileCount++;
-        return true;
-    }
-
-    // switch 语句
-    bool VisitSwitchStmt(SwitchStmt *SS) {
-        Stats.switchCount++;
-        return true;
-    }
-
-    // break 语句
-    bool VisitBreakStmt(BreakStmt *BS) {
-        Stats.breakCount++;
-        return true;
-    }
-
-    // continue 语句
-    bool VisitContinueStmt(ContinueStmt *CS) {
-        Stats.continueCount++;
-        return true;
-    }
-
-    // return 语句
-    bool VisitReturnStmt(ReturnStmt *RS) {
-        Stats.returnCount++;
-        return true;
-    }
-
-    // goto 语句
-    bool VisitGotoStmt(GotoStmt *GS) {
-        Stats.gotoCount++;
-        return true;
-    }
-
     // 函数调用
     bool VisitCallExpr(CallExpr *CE) {
         Stats.callCount++;
@@ -176,20 +134,10 @@ static void printReport(const AnalysisStats &Stats) {
     outs() << "\n";
 
     outs() << "【控制流语句统计】\n";
-    outs() << "  if 语句:       " << Stats.ifCount << "\n";
-    outs() << "  for 语句:      " << Stats.forCount << "\n";
-    outs() << "  while 语句:    " << Stats.whileCount << "\n";
-    outs() << "  do-while 语句: " << Stats.doWhileCount << "\n";
-    outs() << "  switch 语句:   " << Stats.switchCount << "\n";
-    outs() << "  break 语句:    " << Stats.breakCount << "\n";
-    outs() << "  continue 语句: " << Stats.continueCount << "\n";
-    outs() << "  return 语句:   " << Stats.returnCount << "\n";
-    outs() << "  goto 语句:     " << Stats.gotoCount << "\n";
-    int total = Stats.ifCount + Stats.forCount + Stats.whileCount
-              + Stats.doWhileCount + Stats.switchCount
-              + Stats.breakCount + Stats.continueCount
-              + Stats.returnCount + Stats.gotoCount;
-    outs() << "  合计:          " << total << "\n\n";
+    outs() << "  if 语句:    " << Stats.ifCount << "\n";
+    outs() << "  for 语句:   " << Stats.forCount << "\n";
+    outs() << "  while 语句: " << Stats.whileCount << "\n";
+    outs() << "  合计:       " << (Stats.ifCount + Stats.forCount + Stats.whileCount) << "\n\n";
 
     outs() << "【函数调用统计】\n";
     outs() << "  总调用次数: " << Stats.callCount << "\n";

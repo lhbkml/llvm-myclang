@@ -106,11 +106,11 @@ IRMake: IRMake.o
 	$(QUIET)$(CXX) -o $@ $^ $(LDFLAGS) $(LLVMLIBS) $(SYSTEMLIBS)
 
 test: frontendAction
-	@echo "=== 测试 output/test.c ==="
-	./frontendAction output/test.c
+	@echo "=== 测试 test.c ==="
+	./frontendAction test.c
 	@echo ""
-	@echo "=== 测试 output/sum.c ==="
-	./frontendAction output/sum.c
+	@echo "=== 测试 sum.c ==="
+	./frontendAction sum.c
 
 clean:
 	$(QUIET)rm -f $(PROJECTS) $(PROJECT_OBJECTS)

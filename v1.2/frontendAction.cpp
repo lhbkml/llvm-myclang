@@ -1,12 +1,14 @@
 #include "llvm/Support/CommandLine.h"
+#include "llvm/TargetParser/Host.h"
 #include "clang/Frontend/CompilerInstance.h"
-#include "clang/Frontend/CompilerInvocation.h"
 #include "clang/Frontend/ASTConsumers.h"
 #include "clang/Parse/ParseAST.h"
 #include "llvm/Support/VirtualFileSystem.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/Lex/HeaderSearchOptions.h"
+#include "llvm/Support/FileSystem.h"
 #include <iostream>
 #include <map>
 #include <string>
@@ -24,12 +26,6 @@ struct AnalysisStats {
     int ifCount = 0;
     int forCount = 0;
     int whileCount = 0;
-    int doWhileCount = 0;
-    int switchCount = 0;
-    int breakCount = 0;
-    int continueCount = 0;
-    int returnCount = 0;
-    int gotoCount = 0;
     int callCount = 0;
     std::map<std::string, int> callTargets;        // 被调用函数名 -> 调用次数
     std::vector<std::pair<std::string, int>> funcLines; // 函数名, 行数
@@ -96,42 +92,6 @@ public:
         return true;
     }
 
-    // do-while 语句
-    bool VisitDoStmt(DoStmt *DS) {
-        Stats.doWhileCount++;
-        return true;
-    }
-
-    // switch 语句
-    bool VisitSwitchStmt(SwitchStmt *SS) {
-        Stats.switchCount++;
-        return true;
-    }
-
-    // break 语句
-    bool VisitBreakStmt(BreakStmt *BS) {
-        Stats.breakCount++;
-        return true;
-    }
-
-    // continue 语句
-    bool VisitContinueStmt(ContinueStmt *CS) {
-        Stats.continueCount++;
-        return true;
-    }
-
-    // return 语句
-    bool VisitReturnStmt(ReturnStmt *RS) {
-        Stats.returnCount++;
-        return true;
-    }
-
-    // goto 语句
-    bool VisitGotoStmt(GotoStmt *GS) {
-        Stats.gotoCount++;
-        return true;
-    }
-
     // 函数调用
     bool VisitCallExpr(CallExpr *CE) {
         Stats.callCount++;
@@ -176,20 +136,10 @@ static void printReport(const AnalysisStats &Stats) {
     outs() << "\n";
 
     outs() << "【控制流语句统计】\n";
-    outs() << "  if 语句:       " << Stats.ifCount << "\n";
-    outs() << "  for 语句:      " << Stats.forCount << "\n";
-    outs() << "  while 语句:    " << Stats.whileCount << "\n";
-    outs() << "  do-while 语句: " << Stats.doWhileCount << "\n";
-    outs() << "  switch 语句:   " << Stats.switchCount << "\n";
-    outs() << "  break 语句:    " << Stats.breakCount << "\n";
-    outs() << "  continue 语句: " << Stats.continueCount << "\n";
-    outs() << "  return 语句:   " << Stats.returnCount << "\n";
-    outs() << "  goto 语句:     " << Stats.gotoCount << "\n";
-    int total = Stats.ifCount + Stats.forCount + Stats.whileCount
-              + Stats.doWhileCount + Stats.switchCount
-              + Stats.breakCount + Stats.continueCount
-              + Stats.returnCount + Stats.gotoCount;
-    outs() << "  合计:          " << total << "\n\n";
+    outs() << "  if 语句:    " << Stats.ifCount << "\n";
+    outs() << "  for 语句:   " << Stats.forCount << "\n";
+    outs() << "  while 语句: " << Stats.whileCount << "\n";
+    outs() << "  合计:       " << (Stats.ifCount + Stats.forCount + Stats.whileCount) << "\n\n";
 
     outs() << "【函数调用统计】\n";
     outs() << "  总调用次数: " << Stats.callCount << "\n";
@@ -205,45 +155,17 @@ static void printReport(const AnalysisStats &Stats) {
 int main(int argc, char **argv) {
     cl::ParseCommandLineOptions(argc, argv, "Clang C File Analyzer\n");
 
-    // ===== 方案 B：让 Clang 自己发现头文件路径 =====
-    // 构造虚拟命令行，让 CreateFromArgs 自动执行工具链探测
-    std::vector<const char *> FakeArgs = {
-        "frontendAction",       // argv[0] — 用于定位 Clang 资源目录
-        "-fsyntax-only",        // 只分析语法，不生成代码
-        FileName.c_str(),       // 输入文件
-    };
-
-    // 创建临时 CompilerInstance 用于参数解析
-    CompilerInstance TmpCI;
-    TmpCI.createDiagnostics();
-
-    auto Invocation = std::make_shared<CompilerInvocation>();
-    bool Success = CompilerInvocation::CreateFromArgs(
-        *Invocation, FakeArgs, TmpCI.getDiagnostics());
-    if (!Success) {
-        std::cerr << "Failed to parse compiler arguments\n";
-        return 1;
-    }
-
-    // ★ CreateFromArgs 自动完成了：
-    //   ① Clang 资源目录定位 → 内置头文件路径
-    //   ② GCC 工具链探测 → 系统头文件路径
-    //   ③ 目标平台探测 → TargetOpts
-    //   ④ 语言选项设置 → LangOpts
-    // 这一切都在 Invocation->getHeaderSearchOpts() 里了
-
-    // ===== 创建真正的 CompilerInstance =====
     CompilerInstance CI;
     CI.createDiagnostics();
 
-    // 忽略所有编译诊断（我们只分析 AST）
+    // 忽略所有编译诊断（我们只分析 AST，不关心编译警告）
     CI.getDiagnostics().setClient(
         new clang::IgnoringDiagConsumer(), /*ShouldOwnClient=*/true);
 
-    // Target 设置（从 Invocation 读取自动探测的结果）
-    auto &TargetOpts = Invocation->getTargetOpts();
-    clang::TargetInfo* TI =
-        clang::TargetInfo::CreateTargetInfo(CI.getDiagnostics(), TargetOpts);
+    clang::TargetOptions TO;
+    TO.Triple = sys::getDefaultTargetTriple();
+
+    clang::TargetInfo* TI = clang::TargetInfo::CreateTargetInfo(CI.getDiagnostics(), TO);
     CI.setTarget(TI);
 
     IntrusiveRefCntPtr<vfs::FileSystem> VFS = vfs::getRealFileSystem();
@@ -261,13 +183,33 @@ int main(int argc, char **argv) {
         CI.getSourceManager().getOrCreateFileID(*File, SrcMgr::C_User)
     );
 
-    // ★ 关键：用 CreateFromArgs 自动发现的路径替换空的 HeaderSearchOpts
-    //    这代替了方案 A 中手写的 4 条 AddPath()
-    CI.getHeaderSearchOpts() = Invocation->getHeaderSearchOpts();
+    // ===== 配置头文件搜索路径（必须在 createPreprocessor 之前）======
+    // 没有这些路径，预处理器无法解析 #include <>
+    auto &HSOpts = CI.getHeaderSearchOpts();
+
+    // ① Clang 内置头文件（stddef.h, stdarg.h, stdint.h, limits.h 等）
+    //    任何系统头文件 #include <stdio.h> 内部都会依赖这些
+    HSOpts.AddPath("/home/li/llvm-project/build/lib/clang/23/include",
+                   clang::frontend::System, /*IsFramework=*/false,
+                   /*IgnoreSysRoot=*/false);
+
+    // ② 系统 C 头文件（stdio.h, stdlib.h, string.h 等）
+    HSOpts.AddPath("/usr/include",
+                   clang::frontend::System, /*IsFramework=*/false,
+                   /*IgnoreSysRoot=*/false);
+
+    // ③ GCC 工具链头文件（GCC 特有定义，部分系统头文件需要）
+    HSOpts.AddPath("/usr/lib/gcc/x86_64-linux-gnu/13/include",
+                   clang::frontend::System, /*IsFramework=*/false,
+                   /*IgnoreSysRoot=*/false);
+
+    // ④ 用户安装的第三方库
+    HSOpts.AddPath("/usr/local/include",
+                   clang::frontend::System, /*IsFramework=*/false,
+                   /*IgnoreSysRoot=*/false);
 
     CI.createPreprocessor(TU_Complete);
 
-    // ===== AST 分析 =====
     AnalysisStats Stats;
     CI.setASTConsumer(std::make_unique<MyASTConsumer>(Stats));
     CI.createASTContext();

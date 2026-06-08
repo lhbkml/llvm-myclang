@@ -3,6 +3,7 @@ double global_ratio = 0.5;
 char *global_label = "default";
 
 int max(int a, int b) {
+
     if (a > b)
         return a;
     else
