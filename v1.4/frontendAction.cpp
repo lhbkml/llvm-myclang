@@ -4,7 +4,6 @@
 #include "clang/Frontend/ASTConsumers.h"
 #include "clang/Parse/ParseAST.h"
 #include "llvm/Support/VirtualFileSystem.h"
-#include "llvm/Support/Path.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/SourceManager.h"
@@ -13,19 +12,17 @@
 #include <iostream>
 #include <map>
 #include <string>
-#include <vector>
 
 using namespace llvm;
 using namespace clang;
 
-static cl::list<std::string>
-InputFiles(cl::Positional, cl::desc("Input files"), cl::OneOrMore);
+static cl::opt<std::string>
+FileName(cl::Positional, cl::desc("Input file"), cl::Required);
 
 // ====================== 统计数据结构 ======================
 struct AnalysisStats {
     int totalFunctions = 0;
     int globalVars = 0;
-    int localVars = 0;
     int ifCount = 0;
     int forCount = 0;
     int whileCount = 0;
@@ -39,29 +36,6 @@ struct AnalysisStats {
     int includeCount = 0;
     std::map<std::string, int> callTargets;        // 被调用函数名 -> 调用次数
     std::vector<std::pair<std::string, int>> funcLines; // 函数名, 行数
-
-    // 多文件聚合
-    AnalysisStats &operator+=(const AnalysisStats &Other) {
-        totalFunctions += Other.totalFunctions;
-        globalVars     += Other.globalVars;
-        localVars      += Other.localVars;
-        ifCount        += Other.ifCount;
-        forCount       += Other.forCount;
-        whileCount     += Other.whileCount;
-        doWhileCount   += Other.doWhileCount;
-        switchCount    += Other.switchCount;
-        breakCount     += Other.breakCount;
-        continueCount  += Other.continueCount;
-        returnCount    += Other.returnCount;
-        gotoCount      += Other.gotoCount;
-        callCount      += Other.callCount;
-        includeCount   += Other.includeCount;
-        for (const auto &p : Other.callTargets)
-            callTargets[p.first] += p.second;
-        funcLines.insert(funcLines.end(),
-                         Other.funcLines.begin(), Other.funcLines.end());
-        return *this;
-    }
 };
 
 // ====================== 自定义预处理回调（计数 #include）======================
@@ -95,14 +69,8 @@ public:
 
     // 辅助：检查声明是否来自主文件（排除头文件中的声明）
     bool isFromMainFile(Decl *D) {
-        if (!SM) return true;
+        if (!SM) return true;  // 没有 SourceManager 时放行所有
         return SM->isInMainFile(D->getLocation());
-    }
-
-    // 辅助：检查语句是否来自主文件（排除头文件中的语句）
-    bool isStmtFromMainFile(Stmt *S) {
-        if (!SM) return true;
-        return SM->isInMainFile(S->getBeginLoc());
     }
 
     // 访问函数定义
@@ -128,75 +96,68 @@ public:
 
     // 访问变量声明
     bool VisitVarDecl(VarDecl *VD) {
-        if (!isFromMainFile(VD))        // 只统计主文件
-            return true;
-        if (isa<ParmVarDecl>(VD))       // 跳过函数参数
-            return true;
-
-        if (VD->getDeclContext()->isTranslationUnit())
-            Stats.globalVars++;         // 全局变量
-        else
-            Stats.localVars++;          // 局部变量（含静态局部变量）
+        // 全局变量：声明上下文是 translation unit 且来自主文件
+        if (VD->getDeclContext()->isTranslationUnit() && isFromMainFile(VD))
+            Stats.globalVars++;
         return true;
     }
 
     // if 语句
     bool VisitIfStmt(IfStmt *IS) {
-        if (isStmtFromMainFile(IS)) Stats.ifCount++;
+        Stats.ifCount++;
         return true;
     }
 
     // for 语句
     bool VisitForStmt(ForStmt *FS) {
-        if (isStmtFromMainFile(FS)) Stats.forCount++;
+        Stats.forCount++;
         return true;
     }
 
     // while 语句
     bool VisitWhileStmt(WhileStmt *WS) {
-        if (isStmtFromMainFile(WS)) Stats.whileCount++;
+        Stats.whileCount++;
         return true;
     }
 
     // do-while 语句
     bool VisitDoStmt(DoStmt *DS) {
-        if (isStmtFromMainFile(DS)) Stats.doWhileCount++;
+        Stats.doWhileCount++;
         return true;
     }
 
     // switch 语句
     bool VisitSwitchStmt(SwitchStmt *SS) {
-        if (isStmtFromMainFile(SS)) Stats.switchCount++;
+        Stats.switchCount++;
         return true;
     }
 
     // break 语句
     bool VisitBreakStmt(BreakStmt *BS) {
-        if (isStmtFromMainFile(BS)) Stats.breakCount++;
+        Stats.breakCount++;
         return true;
     }
 
     // continue 语句
     bool VisitContinueStmt(ContinueStmt *CS) {
-        if (isStmtFromMainFile(CS)) Stats.continueCount++;
+        Stats.continueCount++;
         return true;
     }
 
     // return 语句
     bool VisitReturnStmt(ReturnStmt *RS) {
-        if (isStmtFromMainFile(RS)) Stats.returnCount++;
+        Stats.returnCount++;
         return true;
     }
 
     // goto 语句
     bool VisitGotoStmt(GotoStmt *GS) {
-        if (isStmtFromMainFile(GS)) Stats.gotoCount++;
+        Stats.gotoCount++;
         return true;
     }
 
     // 函数调用
     bool VisitCallExpr(CallExpr *CE) {
-        if (!isStmtFromMainFile(CE)) return true;
         Stats.callCount++;
         if (FunctionDecl *Callee = CE->getDirectCallee())
             Stats.callTargets[Callee->getNameAsString()]++;
@@ -220,18 +181,14 @@ public:
 };
 
 // ====================== 输出报告 ======================
-static void printReport(const AnalysisStats &Stats,
-                        const std::vector<std::string> &Files) {
+static void printReport(const AnalysisStats &Stats) {
     outs() << "\n";
     outs() << "========== C 源文件分析报告 ==========\n\n";
 
     outs() << "【基本信息】\n";
-    outs() << "  分析文件数: " << Files.size() << "\n";
-    for (const auto &f : Files)
-        outs() << "    - " << f << "\n";
+    outs() << "  输入文件: " << FileName << "\n";
     outs() << "  总函数数量: " << Stats.totalFunctions << "\n";
     outs() << "  全局变量数量: " << Stats.globalVars << "\n";
-    outs() << "  局部变量数量: " << Stats.localVars << "\n";
     outs() << "  #include 数量: " << Stats.includeCount << "\n\n";
 
     outs() << "【每个函数的代码行数】\n";
@@ -269,100 +226,84 @@ static void printReport(const AnalysisStats &Stats,
     outs() << "\n========================================\n";
 }
 
-// ====================== 分析单个文件 ======================
-static bool analyzeFile(const std::string &FilePath,
-                        const CompilerInvocation &SharedInvocation,
-                        AnalysisStats &Stats) {
+// ====================== main ======================
+int main(int argc, char **argv) {
+    cl::ParseCommandLineOptions(argc, argv, "Clang C File Analyzer\n");
+
+    // ===== 方案 B：让 Clang 自己发现头文件路径 =====
+    // 构造虚拟命令行，让 CreateFromArgs 自动执行工具链探测
+    std::vector<const char *> FakeArgs = {
+        "frontendAction",       // argv[0] — 用于定位 Clang 资源目录
+        "-fsyntax-only",        // 只分析语法，不生成代码
+        FileName.c_str(),       // 输入文件
+    };
+
+    // 创建临时 CompilerInstance 用于参数解析
+    CompilerInstance TmpCI;
+    TmpCI.createDiagnostics();
+
+    auto Invocation = std::make_shared<CompilerInvocation>();
+    bool Success = CompilerInvocation::CreateFromArgs(
+        *Invocation, FakeArgs, TmpCI.getDiagnostics());
+    if (!Success) {
+        std::cerr << "Failed to parse compiler arguments\n";
+        return 1;
+    }
+
+    // ★ CreateFromArgs 自动完成了：
+    //   ① Clang 资源目录定位 → 内置头文件路径
+    //   ② GCC 工具链探测 → 系统头文件路径
+    //   ③ 目标平台探测 → TargetOpts
+    //   ④ 语言选项设置 → LangOpts
+    // 这一切都在 Invocation->getHeaderSearchOpts() 里了
+
+    // ===== 创建真正的 CompilerInstance =====
     CompilerInstance CI;
     CI.createDiagnostics();
+
+    // 忽略所有编译诊断（我们只分析 AST）
     CI.getDiagnostics().setClient(
         new clang::IgnoringDiagConsumer(), /*ShouldOwnClient=*/true);
 
-    // Target
-    auto TargetOpts = SharedInvocation.getTargetOpts();
-    clang::TargetInfo *TI =
+    // Target 设置（从 Invocation 读取自动探测的结果）
+    auto &TargetOpts = Invocation->getTargetOpts();
+    clang::TargetInfo* TI =
         clang::TargetInfo::CreateTargetInfo(CI.getDiagnostics(), TargetOpts);
     CI.setTarget(TI);
 
-    // 文件系统
     IntrusiveRefCntPtr<vfs::FileSystem> VFS = vfs::getRealFileSystem();
     CI.setVirtualFileSystem(VFS);
     CI.createFileManager();
     CI.createSourceManager();
 
-    auto File = CI.getFileManager().getFileRef(FilePath);
+    auto File = CI.getFileManager().getFileRef(FileName);
     if (!File) {
-        std::cerr << "File not found: " << FilePath << "\n";
-        return false;
+        std::cerr << "File not found\n";
+        return 1;
     }
 
     CI.getSourceManager().setMainFileID(
-        CI.getSourceManager().getOrCreateFileID(*File, SrcMgr::C_User));
+        CI.getSourceManager().getOrCreateFileID(*File, SrcMgr::C_User)
+    );
 
-    // 头文件路径：共享的系统路径 + 当前文件的父目录（支持相对 #include ""）
-    CI.getHeaderSearchOpts() = SharedInvocation.getHeaderSearchOpts();
-    StringRef ParentDir = llvm::sys::path::parent_path(FilePath);
-    if (!ParentDir.empty())
-        CI.getHeaderSearchOpts().AddPath(ParentDir,
-            clang::frontend::System, false, false);
+    // ★ 关键：用 CreateFromArgs 自动发现的路径替换空的 HeaderSearchOpts
+    //    这代替了方案 A 中手写的 4 条 AddPath()
+    CI.getHeaderSearchOpts() = Invocation->getHeaderSearchOpts();
 
     CI.createPreprocessor(TU_Complete);
 
-    // 注册预处理回调
+    // 注册预处理回调，统计 #include 数量
+    AnalysisStats Stats;
     CI.getPreprocessor().addPPCallbacks(
         std::make_unique<IncludeCounter>(Stats.includeCount));
 
-    // AST 分析
+    // ===== AST 分析 =====
     CI.setASTConsumer(std::make_unique<MyASTConsumer>(Stats));
     CI.createASTContext();
     CI.createSema(TU_Complete, nullptr);
 
     ParseAST(CI.getSema());
-    return true;
-}
 
-// ====================== main ======================
-int main(int argc, char **argv) {
-    cl::ParseCommandLineOptions(argc, argv, "Clang C File Analyzer\n");
-
-    if (InputFiles.empty()) {
-        std::cerr << "No input files\n";
-        return 1;
-    }
-
-    // ===== 一次 CreateFromArgs：共享所有文件的系统头文件路径 =====
-    std::vector<const char *> FakeArgs = {
-        "frontendAction",
-        "-fsyntax-only",
-        InputFiles[0].c_str(),   // 用第一个文件做探测
-    };
-
-    CompilerInstance TmpCI;
-    TmpCI.createDiagnostics();
-
-    auto Invocation = std::make_shared<CompilerInvocation>();
-    if (!CompilerInvocation::CreateFromArgs(*Invocation, FakeArgs,
-                                             TmpCI.getDiagnostics())) {
-        std::cerr << "Failed to parse compiler arguments\n";
-        return 1;
-    }
-
-    // ===== 逐个分析文件，累积统计 =====
-    AnalysisStats totalStats;
-    std::vector<std::string> succeeded;
-    for (const auto &f : InputFiles) {
-        AnalysisStats fileStats;
-        if (analyzeFile(f, *Invocation, fileStats)) {
-            totalStats += fileStats;
-            succeeded.push_back(f);
-        }
-    }
-
-    if (succeeded.empty()) {
-        std::cerr << "Failed to analyze any file\n";
-        return 1;
-    }
-
-    printReport(totalStats, succeeded);
+    printReport(Stats);
     return 0;
 }
