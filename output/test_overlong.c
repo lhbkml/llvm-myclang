@@ -1,0 +1,61 @@
+// 测试行数超标 — 生成一个 60 行的函数
+
+int big_function(int n) {
+    int x = 0;
+    x += 0;  // line 1
+    x += 1;  // line 2
+    x += 2;  // line 3
+    x += 3;  // line 4
+    x += 4;  // line 5
+    x += 5;  // line 6
+    x += 6;  // line 7
+    x += 7;  // line 8
+    x += 8;  // line 9
+    x += 9;  // line 10
+    x += 10;  // line 11
+    x += 11;  // line 12
+    x += 12;  // line 13
+    x += 13;  // line 14
+    x += 14;  // line 15
+    x += 15;  // line 16
+    x += 16;  // line 17
+    x += 17;  // line 18
+    x += 18;  // line 19
+    x += 19;  // line 20
+    x += 20;  // line 21
+    x += 21;  // line 22
+    x += 22;  // line 23
+    x += 23;  // line 24
+    x += 24;  // line 25
+    x += 25;  // line 26
+    x += 26;  // line 27
+    x += 27;  // line 28
+    x += 28;  // line 29
+    x += 29;  // line 30
+    x += 30;  // line 31
+    x += 31;  // line 32
+    x += 32;  // line 33
+    x += 33;  // line 34
+    x += 34;  // line 35
+    x += 35;  // line 36
+    x += 36;  // line 37
+    x += 37;  // line 38
+    x += 38;  // line 39
+    x += 39;  // line 40
+    x += 40;  // line 41
+    x += 41;  // line 42
+    x += 42;  // line 43
+    x += 43;  // line 44
+    x += 44;  // line 45
+    x += 45;  // line 46
+    x += 46;  // line 47
+    x += 47;  // line 48
+    x += 48;  // line 49
+    x += 49;  // line 50
+    x += 50;  // line 51
+    x += 51;  // line 52
+    x += 52;  // line 53
+    x += 53;  // line 54
+    x += 54;  // line 55
+    return x;
+}

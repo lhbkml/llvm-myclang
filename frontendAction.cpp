@@ -21,6 +21,20 @@ using namespace clang;
 static cl::list<std::string>
 InputFiles(cl::Positional, cl::desc("Input files"), cl::OneOrMore);
 
+// 代码规范检查阈值
+static const int MAX_FUNCTION_LINES = 50;
+
+// 检查函数名是否符合小写下划线风格 (snake_case)
+static bool isValidSnakeCase(const std::string &name) {
+    if (name.empty()) return false;
+    for (char c : name) {
+        if (!(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') && c != '_')
+            return false;
+    }
+    // 首字符必须是字母（不允许数字和下划线开头）
+    return name[0] >= 'a' && name[0] <= 'z';
+}
+
 // ====================== 逐函数统计结构 ======================
 struct FunctionStats {
     std::string name;
@@ -38,6 +52,8 @@ struct FunctionStats {
     int callCount = 0;
     int paramCount = 0;
     bool isEmptyOrReturnOnly = false;
+    bool isOverlong = false;                            // 行数超标 (>50行)
+    bool isBadName = false;                             // 命名不规范（非snake_case）
     std::map<std::string, int> callTargets;
 };
 
@@ -60,6 +76,8 @@ struct AnalysisStats {
     int emptyFunctions = 0;                             // 空函数（无函数体/仅return）
     int paramlessFunctions = 0;                         // 无参函数
     int paramFunctions = 0;                             // 有参函数
+    int overlongFunctions = 0;                          // 行数超标函数 (>50行)
+    int badNamedFunctions = 0;                          // 命名不规范函数
     std::map<std::string, int> callTargets;             // 被调用函数名 -> 调用次数
     std::vector<FunctionStats> functions;               // 逐函数明细
 
@@ -82,6 +100,8 @@ struct AnalysisStats {
         emptyFunctions     += Other.emptyFunctions;
         paramlessFunctions += Other.paramlessFunctions;
         paramFunctions     += Other.paramFunctions;
+        overlongFunctions  += Other.overlongFunctions;
+        badNamedFunctions  += Other.badNamedFunctions;
         for (const auto &p : Other.callTargets)
             callTargets[p.first] += p.second;
         functions.insert(functions.end(),
@@ -162,6 +182,14 @@ public:
 
             FS.paramCount = FD->getNumParams();
 
+            // 检测行数超标
+            if (FS.lines > MAX_FUNCTION_LINES)
+                FS.isOverlong = true;
+
+            // 检测命名规范：必须小写下划线风格
+            if (!isValidSnakeCase(FS.name))
+                FS.isBadName = true;
+
             CurrentFunc = &FS;
         }
 
@@ -193,6 +221,12 @@ public:
 
         if (CurrentFunc && CurrentFunc->isEmptyOrReturnOnly)
             Stats.emptyFunctions++;
+
+        if (CurrentFunc && CurrentFunc->isOverlong)
+            Stats.overlongFunctions++;
+
+        if (CurrentFunc && CurrentFunc->isBadName)
+            Stats.badNamedFunctions++;
 
         return true;
     }
@@ -346,6 +380,47 @@ static void printReport(const AnalysisStats &Stats,
     outs() << "  局部变量数量: " << Stats.localVars << "\n";
     outs() << "  #include 数量: " << Stats.includeCount << "\n\n";
 
+    // ===== 代码规范检查（v3.0 新增）=====
+    outs() << "【代码规范检查】\n";
+    outs() << "  函数行数上限: " << MAX_FUNCTION_LINES << " 行\n";
+    if (Stats.overlongFunctions == 0) {
+        outs() << "  ✓ 全部函数在限制内\n";
+    } else {
+        outs() << "  ⚠ 超标函数: " << Stats.overlongFunctions << " 个\n";
+        for (const auto &F : Stats.functions) {
+            if (F.isOverlong)
+                outs() << "    - " << F.name << "(): " << F.lines << " 行 (超标 "
+                        << (F.lines - MAX_FUNCTION_LINES) << " 行)\n";
+        }
+    }
+    outs() << "\n";
+
+    // goto 语句检查（代码规范禁用项）
+    outs() << "  goto 语句:   ";
+    if (Stats.gotoCount == 0) {
+        outs() << "✓ 未使用\n";
+    } else {
+        outs() << "⚠ 发现 " << Stats.gotoCount << " 处\n";
+        for (const auto &F : Stats.functions) {
+            if (F.gotoCount > 0)
+                outs() << "    - " << F.name << "(): " << F.gotoCount << " 处\n";
+        }
+    }
+
+    // 命名规范检查（强制小写下划线风格）
+    outs() << "  命名规范:   ";
+    if (Stats.badNamedFunctions == 0) {
+        outs() << "✓ 全部符合 snake_case\n";
+    } else {
+        outs() << "⚠ 发现 " << Stats.badNamedFunctions << " 个不规范\n";
+        for (const auto &F : Stats.functions) {
+            if (F.isBadName)
+                outs() << "    - " << F.name << "(): 应使用小写下划线风格\n";
+        }
+    }
+
+    outs() << "\n";
+
     // ===== 逐函数统计（v2.0 新增）=====
     outs() << "【逐函数统计】\n";
     if (Stats.functions.empty()) {
@@ -357,6 +432,8 @@ static void printReport(const AnalysisStats &Stats,
                                 ? std::to_string(F.paramCount) + " 参数"
                                 : "无参")
                    << (F.isEmptyOrReturnOnly ? " [空/仅return]" : "")
+                   << (F.isOverlong ? " ⚠ 行数超标" : "")
+                   << (F.isBadName ? " ⚠ 命名不规范" : "")
                    << " ───\n";
             outs() << "    局部变量: " << F.localVars << "\n";
 
