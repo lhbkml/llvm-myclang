@@ -36,8 +36,6 @@ struct FunctionStats {
     int returnCount = 0;
     int gotoCount = 0;
     int callCount = 0;
-    int paramCount = 0;
-    bool isEmptyOrReturnOnly = false;
     std::map<std::string, int> callTargets;
 };
 
@@ -57,9 +55,6 @@ struct AnalysisStats {
     int gotoCount = 0;
     int callCount = 0;
     int includeCount = 0;
-    int emptyFunctions = 0;                             // 空函数（无函数体/仅return）
-    int paramlessFunctions = 0;                         // 无参函数
-    int paramFunctions = 0;                             // 有参函数
     std::map<std::string, int> callTargets;             // 被调用函数名 -> 调用次数
     std::vector<FunctionStats> functions;               // 逐函数明细
 
@@ -78,10 +73,7 @@ struct AnalysisStats {
         returnCount    += Other.returnCount;
         gotoCount      += Other.gotoCount;
         callCount      += Other.callCount;
-        includeCount      += Other.includeCount;
-        emptyFunctions     += Other.emptyFunctions;
-        paramlessFunctions += Other.paramlessFunctions;
-        paramFunctions     += Other.paramFunctions;
+        includeCount   += Other.includeCount;
         for (const auto &p : Other.callTargets)
             callTargets[p.first] += p.second;
         functions.insert(functions.end(),
@@ -148,19 +140,7 @@ public:
                 unsigned startLine = SM->getExpansionLineNumber(FD->getBeginLoc());
                 unsigned endLine   = SM->getExpansionLineNumber(Body->getEndLoc());
                 FS.lines = (endLine >= startLine) ? (endLine - startLine + 1) : 0;
-
-                // 检测空函数：函数体为空 {} 或仅含一条 return
-                if (auto *CS = dyn_cast<CompoundStmt>(Body)) {
-                    if (CS->body_empty()) {
-                        FS.isEmptyOrReturnOnly = true;
-                    } else if (CS->size() == 1 &&
-                               isa<ReturnStmt>(*CS->body_begin())) {
-                        FS.isEmptyOrReturnOnly = true;
-                    }
-                }
             }
-
-            FS.paramCount = FD->getNumParams();
 
             CurrentFunc = &FS;
         }
@@ -185,15 +165,6 @@ public:
             return true;
 
         Stats.totalFunctions++;
-
-        if (FD->getNumParams() == 0)
-            Stats.paramlessFunctions++;
-        else
-            Stats.paramFunctions++;
-
-        if (CurrentFunc && CurrentFunc->isEmptyOrReturnOnly)
-            Stats.emptyFunctions++;
-
         return true;
     }
 
@@ -339,9 +310,6 @@ static void printReport(const AnalysisStats &Stats,
     for (const auto &f : Files)
         outs() << "    - " << f << "\n";
     outs() << "  总函数数量: " << Stats.totalFunctions << "\n";
-    outs() << "  无参函数:     " << Stats.paramlessFunctions << "\n";
-    outs() << "  有参函数:     " << Stats.paramFunctions << "\n";
-    outs() << "  空函数(无体/仅return): " << Stats.emptyFunctions << "\n";
     outs() << "  全局变量数量: " << Stats.globalVars << "\n";
     outs() << "  局部变量数量: " << Stats.localVars << "\n";
     outs() << "  #include 数量: " << Stats.includeCount << "\n\n";
@@ -352,12 +320,7 @@ static void printReport(const AnalysisStats &Stats,
         outs() << "  (无)\n\n";
     } else {
         for (const auto &F : Stats.functions) {
-            outs() << "  ─── " << F.name << "() — " << F.lines << " 行"
-                   << ", " << (F.paramCount > 0
-                                ? std::to_string(F.paramCount) + " 参数"
-                                : "无参")
-                   << (F.isEmptyOrReturnOnly ? " [空/仅return]" : "")
-                   << " ───\n";
+            outs() << "  ─── " << F.name << "() — " << F.lines << " 行 ───\n";
             outs() << "    局部变量: " << F.localVars << "\n";
 
             // 分支/循环语句
