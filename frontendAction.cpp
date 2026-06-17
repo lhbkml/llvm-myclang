@@ -10,6 +10,7 @@
 #include "clang/Basic/SourceManager.h"
 #include "clang/Lex/PPCallbacks.h"
 #include "clang/Lex/Preprocessor.h"
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <string>
@@ -23,6 +24,20 @@ InputFiles(cl::Positional, cl::desc("Input files"), cl::OneOrMore);
 
 // 代码规范检查阈值
 static const int MAX_FUNCTION_LINES = 50;
+static const int MAX_LINE_LENGTH = 100;
+
+// 过长单行信息
+struct LongLineInfo {
+    std::string file;
+    int lineNum;
+    int length;
+};
+
+// 空代码块信息
+struct EmptyBlockInfo {
+    std::string funcName;
+    std::string type;   // "if", "for", "while", "do-while", "else"
+};
 
 // 检查函数名是否符合小写下划线风格 (snake_case)
 static bool isValidSnakeCase(const std::string &name) {
@@ -33,6 +48,13 @@ static bool isValidSnakeCase(const std::string &name) {
     }
     // 首字符必须是字母（不允许数字和下划线开头）
     return name[0] >= 'a' && name[0] <= 'z';
+}
+
+// 检查全局变量名是否有 g_ 前缀（其余部分需符合 snake_case）
+static bool isValidGlobalVarName(const std::string &name) {
+    if (name.size() < 3) return false;  // 至少 "g_x"
+    if (name[0] != 'g' || name[1] != '_') return false;
+    return isValidSnakeCase(name.substr(2));
 }
 
 // ====================== 逐函数统计结构 ======================
@@ -54,6 +76,8 @@ struct FunctionStats {
     bool isEmptyOrReturnOnly = false;
     bool isOverlong = false;                            // 行数超标 (>50行)
     bool isBadName = false;                             // 命名不规范（非snake_case）
+    bool hasRedundantReturn = false;                    // 冗余 return; (void函数末尾)
+    int emptyBlocks = 0;                                // 空代码块数
     std::map<std::string, int> callTargets;
 };
 
@@ -78,6 +102,18 @@ struct AnalysisStats {
     int paramFunctions = 0;                             // 有参函数
     int overlongFunctions = 0;                          // 行数超标函数 (>50行)
     int badNamedFunctions = 0;                          // 命名不规范函数
+    int badGlobalVarNames = 0;                          // 全局变量缺 g_ 前缀
+    std::vector<std::string> badGlobalVars;             // 问题全局变量名列表
+    int longLineCount = 0;                              // 过长单行(>100字符)
+    std::vector<LongLineInfo> longLines;                // 过长单行明细
+    int redundantReturns = 0;                           // 冗余 return; 语句
+    int emptyBlockCount = 0;                            // 空代码块数
+    std::vector<EmptyBlockInfo> emptyBlocks;            // 空代码块明细
+    int totalLines = 0;                                // 总行数
+    int codeLines = 0;                                 // 纯代码行
+    int blankLines = 0;                                // 空行
+    int singleCommentLines = 0;                        // 单行注释 (//)
+    int multiCommentLines = 0;                         // 多行注释 (/* */)
     std::map<std::string, int> callTargets;             // 被调用函数名 -> 调用次数
     std::vector<FunctionStats> functions;               // 逐函数明细
 
@@ -102,6 +138,22 @@ struct AnalysisStats {
         paramFunctions     += Other.paramFunctions;
         overlongFunctions  += Other.overlongFunctions;
         badNamedFunctions  += Other.badNamedFunctions;
+        badGlobalVarNames  += Other.badGlobalVarNames;
+        badGlobalVars.insert(badGlobalVars.end(),
+                             Other.badGlobalVars.begin(),
+                             Other.badGlobalVars.end());
+        longLineCount += Other.longLineCount;
+        longLines.insert(longLines.end(),
+                         Other.longLines.begin(), Other.longLines.end());
+        redundantReturns  += Other.redundantReturns;
+        emptyBlockCount   += Other.emptyBlockCount;
+        emptyBlocks.insert(emptyBlocks.end(),
+                          Other.emptyBlocks.begin(), Other.emptyBlocks.end());
+        totalLines         += Other.totalLines;
+        codeLines          += Other.codeLines;
+        blankLines         += Other.blankLines;
+        singleCommentLines += Other.singleCommentLines;
+        multiCommentLines  += Other.multiCommentLines;
         for (const auto &p : Other.callTargets)
             callTargets[p.first] += p.second;
         functions.insert(functions.end(),
@@ -154,6 +206,21 @@ public:
         return SM->isInMainFile(S->getBeginLoc());
     }
 
+    // 辅助：检测空代码块（if/for/while/do-while 后空大括号）
+    void checkEmptyBlock(Stmt *Body, const std::string &Type) {
+        if (auto *CS = dyn_cast<CompoundStmt>(Body)) {
+            if (CS->body_empty()) {
+                Stats.emptyBlockCount++;
+                Stats.emptyBlocks.push_back({
+                    CurrentFunc ? CurrentFunc->name : "<toplevel>",
+                    Type
+                });
+                if (CurrentFunc)
+                    CurrentFunc->emptyBlocks++;
+            }
+        }
+    }
+
     // ===== TraverseFunctionDecl：管理逐函数统计的 push/pop =====
     bool TraverseFunctionDecl(FunctionDecl *FD) {
         FunctionStats *Saved = CurrentFunc;
@@ -176,6 +243,30 @@ public:
                     } else if (CS->size() == 1 &&
                                isa<ReturnStmt>(*CS->body_begin())) {
                         FS.isEmptyOrReturnOnly = true;
+                    }
+                }
+
+                // 检测冗余 return（函数末尾不必要的 return 语句）
+                if (auto *CS = dyn_cast<CompoundStmt>(Body)) {
+                    if (!CS->body_empty()) {
+                        auto it = CS->body_end();
+                        --it;
+                        if (auto *RS = dyn_cast<ReturnStmt>(*it)) {
+                            // 情况1：void 函数末尾的 return;
+                            if (FD->getReturnType()->isVoidType() &&
+                                !RS->getRetValue()) {
+                                FS.hasRedundantReturn = true;
+                            }
+                            // 情况2：main() 末尾的 return 0; (C99+ 隐式返回0)
+                            else if (FS.name == "main" &&
+                                     FD->getReturnType()->isIntegerType()) {
+                                if (auto *IL = dyn_cast<IntegerLiteral>(
+                                        RS->getRetValue())) {
+                                    if (IL->getValue() == 0)
+                                        FS.hasRedundantReturn = true;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -228,6 +319,9 @@ public:
         if (CurrentFunc && CurrentFunc->isBadName)
             Stats.badNamedFunctions++;
 
+        if (CurrentFunc && CurrentFunc->hasRedundantReturn)
+            Stats.redundantReturns++;
+
         return true;
     }
 
@@ -238,9 +332,15 @@ public:
         if (isa<ParmVarDecl>(VD))       // 跳过函数参数
             return true;
 
-        if (VD->getDeclContext()->isTranslationUnit())
+        if (VD->getDeclContext()->isTranslationUnit()) {
             Stats.globalVars++;         // 全局变量
-        else {
+            // 检测全局变量 g_ 前缀
+            std::string name = VD->getNameAsString();
+            if (!isValidGlobalVarName(name)) {
+                Stats.badGlobalVarNames++;
+                Stats.badGlobalVars.push_back(name);
+            }
+        } else {
             Stats.localVars++;          // 全局汇总：局部变量
             if (CurrentFunc)
                 CurrentFunc->localVars++; // 逐函数：当前函数的局部变量
@@ -253,6 +353,9 @@ public:
         if (isStmtFromMainFile(IS)) {
             Stats.ifCount++;
             if (CurrentFunc) CurrentFunc->ifCount++;
+            checkEmptyBlock(IS->getThen(), "if");
+            if (IS->getElse())
+                checkEmptyBlock(IS->getElse(), "else");
         }
         return true;
     }
@@ -262,6 +365,7 @@ public:
         if (isStmtFromMainFile(FS)) {
             Stats.forCount++;
             if (CurrentFunc) CurrentFunc->forCount++;
+            checkEmptyBlock(FS->getBody(), "for");
         }
         return true;
     }
@@ -271,6 +375,7 @@ public:
         if (isStmtFromMainFile(WS)) {
             Stats.whileCount++;
             if (CurrentFunc) CurrentFunc->whileCount++;
+            checkEmptyBlock(WS->getBody(), "while");
         }
         return true;
     }
@@ -280,6 +385,7 @@ public:
         if (isStmtFromMainFile(DS)) {
             Stats.doWhileCount++;
             if (CurrentFunc) CurrentFunc->doWhileCount++;
+            checkEmptyBlock(DS->getBody(), "do-while");
         }
         return true;
     }
@@ -380,13 +486,23 @@ static void printReport(const AnalysisStats &Stats,
     outs() << "  局部变量数量: " << Stats.localVars << "\n";
     outs() << "  #include 数量: " << Stats.includeCount << "\n\n";
 
+    // ===== 代码行数统计（v4.0 新增）=====
+    outs() << "【代码行数统计】\n";
+    outs() << "  总行数:     " << Stats.totalLines << "\n";
+    outs() << "  代码行:     " << Stats.codeLines << "\n";
+    outs() << "  空行:       " << Stats.blankLines << "\n";
+    int totalComment = Stats.singleCommentLines + Stats.multiCommentLines;
+    outs() << "  注释行:     " << totalComment << "\n";
+    outs() << "    - 单行(//): " << Stats.singleCommentLines << "\n";
+    outs() << "    - 多行(/**/): " << Stats.multiCommentLines << "\n\n";
+
     // ===== 代码规范检查（v3.0 新增）=====
     outs() << "【代码规范检查】\n";
-    outs() << "  函数行数上限: " << MAX_FUNCTION_LINES << " 行\n";
+    outs() << "  函数行数上限(" << MAX_FUNCTION_LINES << "行): ";
     if (Stats.overlongFunctions == 0) {
-        outs() << "  ✓ 全部函数在限制内\n";
+        outs() << "✓ 全部在限制内\n";
     } else {
-        outs() << "  ⚠ 超标函数: " << Stats.overlongFunctions << " 个\n";
+        outs() << "⚠ 发现 " << Stats.overlongFunctions << " 个超标\n";
         for (const auto &F : Stats.functions) {
             if (F.isOverlong)
                 outs() << "    - " << F.name << "(): " << F.lines << " 行 (超标 "
@@ -417,6 +533,53 @@ static void printReport(const AnalysisStats &Stats,
             if (F.isBadName)
                 outs() << "    - " << F.name << "(): 应使用小写下划线风格\n";
         }
+    }
+
+    // 全局变量命名规范检查（强制 g_ 前缀）
+    outs() << "  全局变量命名: ";
+    if (Stats.badGlobalVarNames == 0) {
+        outs() << "✓ 全部有 g_ 前缀\n";
+    } else {
+        outs() << "⚠ 发现 " << Stats.badGlobalVarNames << " 个缺少 g_ 前缀\n";
+        for (const auto &name : Stats.badGlobalVars)
+            outs() << "    - " << name << " → 应改为 g_" << name << "\n";
+    }
+
+    // 过长单行代码检查 (>MAX_LINE_LENGTH 字符)
+    outs() << "  单行长度(" << MAX_LINE_LENGTH << "字符): ";
+    if (Stats.longLineCount == 0) {
+        outs() << "✓ 全部在限制内\n";
+    } else {
+        outs() << "⚠ 发现 " << Stats.longLineCount << " 行超标\n";
+        for (const auto &L : Stats.longLines)
+            outs() << "    - " << L.file << ":" << L.lineNum
+                   << " (" << L.length << " 字符)\n";
+    }
+
+    // 冗余 return 语句检查（void 函数末尾的 return;）
+    outs() << "  冗余 return: ";
+    if (Stats.redundantReturns == 0) {
+        outs() << "✓ 未发现\n";
+    } else {
+        outs() << "⚠ 发现 " << Stats.redundantReturns << " 处\n";
+        for (const auto &F : Stats.functions) {
+            if (F.hasRedundantReturn) {
+                if (F.name == "main")
+                    outs() << "    - main(): 末尾 return 0; 是多余的 (C99+ 隐式返回0)\n";
+                else
+                    outs() << "    - " << F.name << "(): void 函数末尾 return; 是多余的\n";
+            }
+        }
+    }
+
+    // 空代码块检查（if/for/while/do-while 后空大括号）
+    outs() << "  空代码块:   ";
+    if (Stats.emptyBlockCount == 0) {
+        outs() << "✓ 未发现\n";
+    } else {
+        outs() << "⚠ 发现 " << Stats.emptyBlockCount << " 处\n";
+        for (const auto &B : Stats.emptyBlocks)
+            outs() << "    - " << B.funcName << "(): " << B.type << " 空块\n";
     }
 
     outs() << "\n";
@@ -545,6 +708,72 @@ static bool analyzeFile(const std::string &FilePath,
     CI.createSema(TU_Complete, nullptr);
 
     ParseAST(CI.getSema());
+
+    // 文本级分析：行数分类 + 长行检测
+    std::ifstream src(FilePath);
+    if (src.is_open()) {
+        std::string line;
+        int lineNum = 0;
+        bool inBlockComment = false;
+        while (std::getline(src, line)) {
+            lineNum++;
+            int len = line.length();
+            Stats.totalLines++;
+
+            // 过长单行检测
+            if (len > MAX_LINE_LENGTH) {
+                Stats.longLineCount++;
+                Stats.longLines.push_back({FilePath, lineNum, len});
+            }
+
+            // 行数分类
+            size_t first = line.find_first_not_of(" \t\r");
+            if (first == std::string::npos) {
+                Stats.blankLines++;            // 纯空行
+                continue;
+            }
+
+            if (inBlockComment) {
+                Stats.multiCommentLines++;     // 块注释内部
+                if (line.find("*/") != std::string::npos)
+                    inBlockComment = false;
+                continue;
+            }
+
+            std::string trimmed = line.substr(first);
+            if (trimmed.compare(0, 2, "//") == 0) {
+                Stats.singleCommentLines++;    // // 单行注释
+                continue;
+            }
+
+            bool isComment = false;
+            size_t bs = line.find("/*");
+            if (bs != std::string::npos) {
+                size_t be = line.find("*/", bs + 2);
+                std::string before = line.substr(0, bs);
+                bool hasCodeBefore = (before.find_first_not_of(" \t\r") != std::string::npos);
+                if (be != std::string::npos) {
+                    // 同行闭合：/* ... */ 有前后代码 → 代码行
+                    std::string after = line.substr(be + 2);
+                    bool hasCodeAfter = (after.find_first_not_of(" \t\r") != std::string::npos);
+                    if (!hasCodeBefore && !hasCodeAfter) {
+                        Stats.multiCommentLines++;
+                        isComment = true;
+                    }
+                } else {
+                    // 多行块注释开始
+                    if (!hasCodeBefore) {
+                        Stats.multiCommentLines++;
+                        isComment = true;
+                    }
+                    inBlockComment = true;
+                }
+            }
+            if (!isComment)
+                Stats.codeLines++;
+        }
+    }
+
     return true;
 }
 
