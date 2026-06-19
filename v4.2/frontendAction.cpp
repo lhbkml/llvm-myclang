@@ -8,6 +8,7 @@
 #include "llvm/Support/Format.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/RecursiveASTVisitor.h"
+#include "clang/Analysis/CFG.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Lex/PPCallbacks.h"
 #include "clang/Lex/Preprocessor.h"
@@ -201,6 +202,7 @@ class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor> {
 public:
     AnalysisStats &Stats;
     SourceManager *SM = nullptr;
+    ASTContext *Ctx = nullptr;
 
     // 当前正在遍历的函数（用于逐函数统计）
     FunctionStats *CurrentFunc = nullptr;
@@ -300,17 +302,23 @@ public:
         // 递归遍历函数体（期间所有 Visit 方法都能看到 CurrentFunc）
         bool result = RecursiveASTVisitor::TraverseFunctionDecl(FD);
 
-        // 计算圈复杂度
-        // CCN = 1 + if + for + while + do-while + case + &&/|| + ?:
-        if (CurrentFunc == &FS) {
-            FS.ccn = 1
-                + FS.ifCount
-                + FS.forCount
-                + FS.whileCount
-                + FS.doWhileCount
-                + FS.caseCount
-                + FS.logicalAndOrCount
-                + FS.conditionalOpCount;
+        // 计算圈复杂度（基于控制流图: M = E - N + 2P）
+        if (CurrentFunc == &FS && Ctx && FD->hasBody()) {
+            CFG::BuildOptions opts;
+            opts.AddEHEdges = false;
+            opts.AddImplicitDtors = false;
+            opts.AddStaticInitBranches = false;
+            opts.PruneTriviallyFalseEdges = false;
+            std::unique_ptr<CFG> cfg = CFG::buildCFG(FD, FD->getBody(), Ctx, opts);
+            if (cfg) {
+                int nodes = 0, edges = 0;
+                for (auto it = cfg->begin(); it != cfg->end(); ++it) {
+                    nodes++;
+                    edges += (*it)->succ_size();
+                }
+                FS.ccn = edges - nodes + 2;
+                if (FS.ccn < 1) FS.ccn = 1;
+            }
         }
 
         // 弹出当前函数，保存统计
@@ -519,6 +527,7 @@ public:
     void HandleTranslationUnit(ASTContext &Context) override {
         MyASTVisitor Visitor(Stats);
         Visitor.SM = &Context.getSourceManager();
+        Visitor.Ctx = &Context;
         Visitor.TraverseDecl(Context.getTranslationUnitDecl());
     }
 };

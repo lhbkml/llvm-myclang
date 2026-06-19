@@ -5,7 +5,6 @@
 #include "clang/Parse/ParseAST.h"
 #include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/Path.h"
-#include "llvm/Support/Format.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/SourceManager.h"
@@ -68,16 +67,12 @@ struct FunctionStats {
     int whileCount = 0;
     int doWhileCount = 0;
     int switchCount = 0;
-    int caseCount = 0;                                  // case/default 标签数
     int breakCount = 0;
     int continueCount = 0;
     int returnCount = 0;
     int gotoCount = 0;
     int callCount = 0;
     int paramCount = 0;
-    int ccn = 1;                                        // 圈复杂度 (Cyclomatic Complexity Number)
-    int logicalAndOrCount = 0;                          // && 和 || 运算符数
-    int conditionalOpCount = 0;                         // ?: 三元运算符数
     bool isEmptyOrReturnOnly = false;
     bool isOverlong = false;                            // 行数超标 (>50行)
     bool isBadName = false;                             // 命名不规范（非snake_case）
@@ -96,9 +91,6 @@ struct AnalysisStats {
     int whileCount = 0;
     int doWhileCount = 0;
     int switchCount = 0;
-    int caseCount = 0;                                  // case/default 标签数
-    int logicalAndOrCount = 0;                          // && 和 || 运算符数
-    int conditionalOpCount = 0;                         // ?: 三元运算符数
     int breakCount = 0;
     int continueCount = 0;
     int returnCount = 0;
@@ -122,7 +114,6 @@ struct AnalysisStats {
     int blankLines = 0;                                // 空行
     int singleCommentLines = 0;                        // 单行注释 (//)
     int multiCommentLines = 0;                         // 多行注释 (/* */)
-    int preprocessorLines = 0;                         // 预处理指令行 (#)
     std::map<std::string, int> callTargets;             // 被调用函数名 -> 调用次数
     std::vector<FunctionStats> functions;               // 逐函数明细
 
@@ -136,9 +127,6 @@ struct AnalysisStats {
         whileCount     += Other.whileCount;
         doWhileCount   += Other.doWhileCount;
         switchCount    += Other.switchCount;
-        caseCount      += Other.caseCount;
-        logicalAndOrCount  += Other.logicalAndOrCount;
-        conditionalOpCount += Other.conditionalOpCount;
         breakCount     += Other.breakCount;
         continueCount  += Other.continueCount;
         returnCount    += Other.returnCount;
@@ -166,7 +154,6 @@ struct AnalysisStats {
         blankLines         += Other.blankLines;
         singleCommentLines += Other.singleCommentLines;
         multiCommentLines  += Other.multiCommentLines;
-        preprocessorLines  += Other.preprocessorLines;
         for (const auto &p : Other.callTargets)
             callTargets[p.first] += p.second;
         functions.insert(functions.end(),
@@ -300,19 +287,6 @@ public:
         // 递归遍历函数体（期间所有 Visit 方法都能看到 CurrentFunc）
         bool result = RecursiveASTVisitor::TraverseFunctionDecl(FD);
 
-        // 计算圈复杂度
-        // CCN = 1 + if + for + while + do-while + case + &&/|| + ?:
-        if (CurrentFunc == &FS) {
-            FS.ccn = 1
-                + FS.ifCount
-                + FS.forCount
-                + FS.whileCount
-                + FS.doWhileCount
-                + FS.caseCount
-                + FS.logicalAndOrCount
-                + FS.conditionalOpCount;
-        }
-
         // 弹出当前函数，保存统计
         if (CurrentFunc == &FS) {
             Stats.functions.push_back(std::move(FS));
@@ -425,15 +399,6 @@ public:
         return true;
     }
 
-    // case / default 标签（圈复杂度决策点）
-    bool VisitSwitchCase(SwitchCase *SC) {
-        if (isStmtFromMainFile(SC)) {
-            Stats.caseCount++;
-            if (CurrentFunc) CurrentFunc->caseCount++;
-        }
-        return true;
-    }
-
     // break 语句
     bool VisitBreakStmt(BreakStmt *BS) {
         if (isStmtFromMainFile(BS)) {
@@ -466,26 +431,6 @@ public:
         if (isStmtFromMainFile(GS)) {
             Stats.gotoCount++;
             if (CurrentFunc) CurrentFunc->gotoCount++;
-        }
-        return true;
-    }
-
-    // 二元运算符：逻辑 && 和 ||（圈复杂度决策点）
-    bool VisitBinaryOperator(BinaryOperator *BO) {
-        if (isStmtFromMainFile(BO)) {
-            if (BO->getOpcode() == BO_LAnd || BO->getOpcode() == BO_LOr) {
-                Stats.logicalAndOrCount++;
-                if (CurrentFunc) CurrentFunc->logicalAndOrCount++;
-            }
-        }
-        return true;
-    }
-
-    // 三元运算符 ?:（圈复杂度决策点）
-    bool VisitConditionalOperator(ConditionalOperator *CO) {
-        if (isStmtFromMainFile(CO)) {
-            Stats.conditionalOpCount++;
-            if (CurrentFunc) CurrentFunc->conditionalOpCount++;
         }
         return true;
     }
@@ -546,7 +491,6 @@ static void printReport(const AnalysisStats &Stats,
     outs() << "  总行数:     " << Stats.totalLines << "\n";
     outs() << "  代码行:     " << Stats.codeLines << "\n";
     outs() << "  空行:       " << Stats.blankLines << "\n";
-    outs() << "  预处理指令: " << Stats.preprocessorLines << "\n";
     int totalComment = Stats.singleCommentLines + Stats.multiCommentLines;
     outs() << "  注释行:     " << totalComment << "\n";
     outs() << "    - 单行(//): " << Stats.singleCommentLines << "\n";
@@ -650,7 +594,6 @@ static void printReport(const AnalysisStats &Stats,
                    << ", " << (F.paramCount > 0
                                 ? std::to_string(F.paramCount) + " 参数"
                                 : "无参")
-                   << ", CCN=" << F.ccn
                    << (F.isEmptyOrReturnOnly ? " [空/仅return]" : "")
                    << (F.isOverlong ? " ⚠ 行数超标" : "")
                    << (F.isBadName ? " ⚠ 命名不规范" : "")
@@ -664,19 +607,14 @@ static void printReport(const AnalysisStats &Stats,
             if (F.whileCount)   outs() << " while:"   << F.whileCount;
             if (F.doWhileCount) outs() << " do-while:"<< F.doWhileCount;
             if (F.switchCount)  outs() << " switch:"  << F.switchCount;
-            if (F.caseCount)    outs() << " case:"    << F.caseCount;
-            if (F.logicalAndOrCount) outs() << " &&/||:" << F.logicalAndOrCount;
-            if (F.conditionalOpCount) outs() << " ?::" << F.conditionalOpCount;
             if (F.breakCount)   outs() << " break:"   << F.breakCount;
             if (F.continueCount)outs() << " continue:"<< F.continueCount;
             if (F.returnCount)  outs() << " return:"  << F.returnCount;
             if (F.gotoCount)    outs() << " goto:"    << F.gotoCount;
             // 如果全部为 0
             if (F.ifCount == 0 && F.forCount == 0 && F.whileCount == 0 &&
-                F.doWhileCount == 0 && F.switchCount == 0 && F.caseCount == 0 &&
-                F.logicalAndOrCount == 0 && F.conditionalOpCount == 0 &&
-                F.breakCount == 0 && F.continueCount == 0 &&
-                F.returnCount == 0 && F.gotoCount == 0)
+                F.doWhileCount == 0 && F.switchCount == 0 && F.breakCount == 0 &&
+                F.continueCount == 0 && F.returnCount == 0 && F.gotoCount == 0)
                 outs() << " (无)";
             outs() << "\n";
 
@@ -692,23 +630,6 @@ static void printReport(const AnalysisStats &Stats,
             }
             outs() << "\n\n";
         }
-
-        // 圈复杂度汇总
-        if (!Stats.functions.empty()) {
-            int totalCCN = 0;
-            int maxCCN = 0;
-            std::string maxCCNFunc;
-            for (const auto &F : Stats.functions) {
-                totalCCN += F.ccn;
-                if (F.ccn > maxCCN) {
-                    maxCCN = F.ccn;
-                    maxCCNFunc = F.name;
-                }
-            }
-            double avgCCN = (double)totalCCN / Stats.functions.size();
-            outs() << "  平均圈复杂度: " << format("%.1f", avgCCN);
-            outs() << "  最高: " << maxCCNFunc << "() = " << maxCCN << "\n";
-        }
     }
 
     // ===== 全局汇总：控制流 =====
@@ -718,17 +639,12 @@ static void printReport(const AnalysisStats &Stats,
     outs() << "  while 语句:    " << Stats.whileCount << "\n";
     outs() << "  do-while 语句: " << Stats.doWhileCount << "\n";
     outs() << "  switch 语句:   " << Stats.switchCount << "\n";
-    outs() << "  case 标签:     " << Stats.caseCount << "\n";
-    outs() << "  && / || 运算:  " << Stats.logicalAndOrCount << "\n";
-    outs() << "  ?: 三元运算:   " << Stats.conditionalOpCount << "\n";
     outs() << "  break 语句:    " << Stats.breakCount << "\n";
     outs() << "  continue 语句: " << Stats.continueCount << "\n";
     outs() << "  return 语句:   " << Stats.returnCount << "\n";
     outs() << "  goto 语句:     " << Stats.gotoCount << "\n";
     int total = Stats.ifCount + Stats.forCount + Stats.whileCount
               + Stats.doWhileCount + Stats.switchCount
-              + Stats.caseCount + Stats.logicalAndOrCount
-              + Stats.conditionalOpCount
               + Stats.breakCount + Stats.continueCount
               + Stats.returnCount + Stats.gotoCount;
     outs() << "  合计:          " << total << "\n\n";
@@ -827,11 +743,6 @@ static bool analyzeFile(const std::string &FilePath,
             std::string trimmed = line.substr(first);
             if (trimmed.compare(0, 2, "//") == 0) {
                 Stats.singleCommentLines++;    // // 单行注释
-                continue;
-            }
-
-            if (trimmed[0] == '#') {
-                Stats.preprocessorLines++;     // #预处理指令
                 continue;
             }
 
