@@ -16,7 +16,6 @@
 #include <fstream>
 #include <iostream>
 #include <map>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -42,13 +41,6 @@ struct LongLineInfo {
 struct EmptyBlockInfo {
     std::string funcName;
     std::string type;   // "if", "for", "while", "do-while", "else"
-};
-
-// switch case 穿透信息
-struct FallThroughInfo {
-    std::string funcName;
-    std::string fromCase;   // 源 case 标签
-    std::string toCase;     // 穿透到的 case 标签
 };
 
 // 检查函数名是否符合小写下划线风格 (snake_case)
@@ -93,10 +85,8 @@ struct FunctionStats {
     bool isOverlong = false;                            // 行数超标 (>50行)
     bool isBadName = false;                             // 命名不规范（非snake_case）
     bool hasRedundantReturn = false;                    // 冗余 return; (void函数末尾)
-    bool hasDeadCode = false;                           // 含不可达路径上的死代码
-    int deadStmtCount = 0;                              // 不可达路径上的语句数
-    bool hasFallThrough = false;                        // 含 switch 穿透
-    int fallThroughCount = 0;                           // switch 穿透数
+    bool hasDeadReturn = false;                         // 含无法执行的 return 语句
+    int deadReturnCount = 0;                            // 无法执行的 return 语句数量
     bool isHighCCN = false;                             // 圈复杂度过高 (>MAX_CCN)
     int emptyBlocks = 0;                                // 空代码块数
     std::map<std::string, int> callTargets;
@@ -131,9 +121,7 @@ struct AnalysisStats {
     int longLineCount = 0;                              // 过长单行(>100字符)
     std::vector<LongLineInfo> longLines;                // 过长单行明细
     int redundantReturns = 0;                           // 冗余 return; 语句
-    int deadStmts = 0;                                  // 不可达路径上的死代码语句
-    int fallThroughCount = 0;                          // switch 穿透数
-    std::vector<FallThroughInfo> fallThroughs;          // 穿透明细
+    int deadReturns = 0;                                // 无法执行的 return 语句
     int highCCNFunctions = 0;                          // 圈复杂度过高函数 (>MAX_CCN)
     int emptyBlockCount = 0;                            // 空代码块数
     std::vector<EmptyBlockInfo> emptyBlocks;            // 空代码块明细
@@ -178,10 +166,7 @@ struct AnalysisStats {
         longLines.insert(longLines.end(),
                          Other.longLines.begin(), Other.longLines.end());
         redundantReturns  += Other.redundantReturns;
-        deadStmts        += Other.deadStmts;
-        fallThroughCount  += Other.fallThroughCount;
-        fallThroughs.insert(fallThroughs.end(),
-                            Other.fallThroughs.begin(), Other.fallThroughs.end());
+        deadReturns       += Other.deadReturns;
         highCCNFunctions  += Other.highCCNFunctions;
         emptyBlockCount   += Other.emptyBlockCount;
         emptyBlocks.insert(emptyBlocks.end(),
@@ -284,6 +269,30 @@ public:
                         FS.isEmptyOrReturnOnly = true;
                     }
                 }
+
+                // 检测冗余 return（函数末尾不必要的 return 语句）
+                if (auto *CS = dyn_cast<CompoundStmt>(Body)) {
+                    if (!CS->body_empty()) {
+                        auto it = CS->body_end();
+                        --it;
+                        if (auto *RS = dyn_cast<ReturnStmt>(*it)) {
+                            // 情况1：void 函数末尾的 return;
+                            if (FD->getReturnType()->isVoidType() &&
+                                !RS->getRetValue()) {
+                                FS.hasRedundantReturn = true;
+                            }
+                            // 情况2：main() 末尾的 return 0; (C99+ 隐式返回0)
+                            else if (FS.name == "main" &&
+                                     FD->getReturnType()->isIntegerType()) {
+                                if (auto *IL = dyn_cast<IntegerLiteral>(
+                                        RS->getRetValue())) {
+                                    if (IL->getValue() == 0)
+                                        FS.hasRedundantReturn = true;
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             FS.paramCount = FD->getNumParams();
@@ -323,7 +332,7 @@ public:
                     Stats.highCCNFunctions++;
                 }
 
-                // 检测死代码：CFG 中从入口不可达的块中的所有语句
+                // 检测无法执行的 return 语句（所在 CFG 块从入口不可达）
                 CFGReverseBlockReachabilityAnalysis reach(*cfg);
                 const CFGBlock *entryBlock = &cfg->getEntry();
                 for (auto it = cfg->begin(); it != cfg->end(); ++it) {
@@ -331,86 +340,16 @@ public:
                     if (B == entryBlock) continue;
                     if (!reach.isReachable(entryBlock, B)) {
                         for (const CFGElement &Elem : *B) {
-                            if (Elem.getAs<CFGStmt>())
-                                FS.deadStmtCount++;
-                        }
-                    }
-                }
-                if (FS.deadStmtCount > 0) {
-                    FS.hasDeadCode = true;
-                    Stats.deadStmts++;
-                }
-
-                // 检测 switch 穿透
-                {
-                    std::set<const CFGBlock*> caseBlocks, dispatchBlocks;
-                    for (auto ci = cfg->begin(); ci != cfg->end(); ++ci) {
-                        if ((*ci)->getLabel() && isa<SwitchCase>((*ci)->getLabel()))
-                            caseBlocks.insert(*ci);
-                    }
-                    for (auto ci = cfg->begin(); ci != cfg->end(); ++ci) {
-                        int n = 0;
-                        for (auto si = (*ci)->succ_begin(); si != (*ci)->succ_end(); ++si)
-                            if (si->isReachable() && caseBlocks.count(si->getReachableBlock()))
-                                n++;
-                        if (n >= 2) dispatchBlocks.insert(*ci);
-                    }
-                    for (auto ci = cfg->begin(); ci != cfg->end(); ++ci) {
-                        const CFGBlock *B = *ci;
-                        if (dispatchBlocks.count(B)) continue;
-                        for (auto si = B->succ_begin(); si != B->succ_end(); ++si) {
-                            if (si->isReachable() && caseBlocks.count(si->getReachableBlock())) {
-                                // case→case 或 body→case 均视为穿透
-                                FS.fallThroughCount++;
-                                break;
+                            if (auto S = Elem.getAs<CFGStmt>()) {
+                                if (isa<ReturnStmt>(S->getStmt()))
+                                    FS.deadReturnCount++;
                             }
                         }
                     }
-                    if (FS.fallThroughCount > 0) {
-                        FS.hasFallThrough = true;
-                        Stats.fallThroughCount += FS.fallThroughCount;
-                    }
                 }
-
-                // 检测冗余 return（仅在可达时才标记，死 return 归死代码检查）
-                if (FD->hasBody()) {
-                    if (auto *CS = dyn_cast<CompoundStmt>(FD->getBody())) {
-                        if (!CS->body_empty()) {
-                            auto it = CS->body_end();
-                            --it;
-                            if (auto *RS = dyn_cast<ReturnStmt>(*it)) {
-                                // 在 CFG 中定位该 return，检查其所在块是否可达
-                                bool retIsReachable = true;
-                                for (auto ci = cfg->begin(); ci != cfg->end(); ++ci) {
-                                    for (const CFGElement &Elem : **ci) {
-                                        if (auto S = Elem.getAs<CFGStmt>()) {
-                                            if (S->getStmt() == RS) {
-                                                retIsReachable = reach.isReachable(entryBlock, *ci);
-                                                goto ret_found;
-                                            }
-                                        }
-                                    }
-                                }
-                                ret_found:
-                                if (retIsReachable) {
-                                    if (FD->getReturnType()->isVoidType() &&
-                                        !RS->getRetValue()) {
-                                        FS.hasRedundantReturn = true;
-                                        Stats.redundantReturns++;
-                                    } else if (FS.name == "main" &&
-                                               FD->getReturnType()->isIntegerType()) {
-                                        if (auto *IL = dyn_cast<IntegerLiteral>(
-                                                RS->getRetValue())) {
-                                            if (IL->getValue() == 0) {
-                                                FS.hasRedundantReturn = true;
-                                                Stats.redundantReturns++;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                if (FS.deadReturnCount > 0) {
+                    FS.hasDeadReturn = true;
+                    Stats.deadReturns++;
                 }
             }
         }
@@ -446,6 +385,9 @@ public:
 
         if (CurrentFunc && CurrentFunc->isBadName)
             Stats.badNamedFunctions++;
+
+        if (CurrentFunc && CurrentFunc->hasRedundantReturn)
+            Stats.redundantReturns++;
 
         return true;
     }
@@ -728,29 +670,16 @@ static void printReport(const AnalysisStats &Stats,
         }
     }
 
-    // switch 穿透检查
-    outs() << "  switch穿透: ";
-    if (Stats.fallThroughCount == 0) {
+    // 无法执行 return 语句检查（CFG 可达性分析）
+    outs() << "  无法执行return: ";
+    if (Stats.deadReturns == 0) {
         outs() << "✓ 未发现\n";
     } else {
-        outs() << "⚠ 发现 " << Stats.fallThroughCount << " 处\n";
+        outs() << "⚠ 发现 " << Stats.deadReturns << " 处\n";
         for (const auto &F : Stats.functions) {
-            if (F.hasFallThrough)
-                outs() << "    - " << F.name << "(): " << F.fallThroughCount
-                       << " 处穿透\n";
-        }
-    }
-
-    // 死代码检查（CFG 可达性分析：不可达块中的所有语句）
-    outs() << "  死代码:     ";
-    if (Stats.deadStmts == 0) {
-        outs() << "✓ 未发现\n";
-    } else {
-        outs() << "⚠ 发现 " << Stats.deadStmts << " 条不可达语句\n";
-        for (const auto &F : Stats.functions) {
-            if (F.hasDeadCode)
-                outs() << "    - " << F.name << "(): " << F.deadStmtCount
-                       << " 条语句在不可达路径上\n";
+            if (F.hasDeadReturn)
+                outs() << "    - " << F.name << "(): " << F.deadReturnCount
+                       << " 个return在不可达路径上\n";
         }
     }
 
@@ -794,8 +723,7 @@ static void printReport(const AnalysisStats &Stats,
                    << (F.isOverlong ? " ⚠ 行数超标" : "")
                    << (F.isHighCCN ? " ⚠ 圈复杂度过高" : "")
                    << (F.isBadName ? " ⚠ 命名不规范" : "")
-                   << (F.hasDeadCode ? " ⚠ 含死代码" : "")
-                   << (F.hasFallThrough ? " ⚠ switch穿透" : "")
+                   << (F.hasDeadReturn ? " ⚠ 含无法执行return" : "")
                    << " ───\n";
             outs() << "    局部变量: " << F.localVars << "\n";
 
