@@ -106,7 +106,7 @@ else
 endif
 
 PROJECTS = frontendAction IRMake
-PROJECT_OBJECTS = frontendAction.o IRMake.o visitor.o report.o pipeline.o
+PROJECT_OBJECTS = frontendAction.o IRMake.o
 
 default: all
 
@@ -116,7 +116,7 @@ all: $(PROJECTS)
 	@echo Compiling $*.cpp
 	$(QUIET)$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $<
 
-frontendAction: frontendAction.o visitor.o report.o pipeline.o
+frontendAction: frontendAction.o
 	@echo Linking $@
 	$(QUIET)$(CXX) -o $@ $^ $(LDFLAGS) -Wl,--start-group $(CLANGLIBS) $(LLVMLIBS) $(SYSTEMLIBS) -Wl,--end-group
 

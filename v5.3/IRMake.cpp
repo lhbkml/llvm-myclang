@@ -6,7 +6,6 @@
 #include <llvm/IR/Instructions.h>//这个头文件声明Instruction类的所有子类，一种基本的IR数据结构。
 #include <llvm/IR/LLVMContext.h>//这个头文件存储LLVM程序库的全局域数据，每个线程使用不同的context，让多线程实现正确工作。
 #include <llvm/IR/Module.h>//这个头文件声明Module类，IR层级结构的顶层实体。
-#include <llvm/TargetParser/Triple.h>
 #include <llvm/Bitcode/BitcodeWriter.h>//这个头文件为我们提供了读写LLVM bitcode文件的代码。
 #include <llvm/Support/ToolOutputFile.h>//这个头文件声明了一个辅助类，用以写输出文件。
 #include <llvm/Support/FileSystem.h>//这个头文件提供了与文件系统交互的函数和类，例如创建、删除、检查文件等。

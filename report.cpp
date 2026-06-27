@@ -1,0 +1,555 @@
+#include "report.h"
+
+#include "llvm/Support/Format.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <sstream>
+
+using namespace llvm;
+
+// ====================== JSON 序列化 ======================
+
+json::Value &jsonSet(json::Object &O, const char *Key) {
+    const json::ObjectKey k(Key);
+    return O[k];
+}
+
+json::Value toJSON(const LongLineInfo &L) {
+    return json::Object{{"file", L.file}, {"line", L.lineNum}, {"length", L.length}};
+}
+
+json::Value toJSON(const EmptyBlockInfo &B) {
+    return json::Object{{"function", B.funcName}, {"type", B.type}};
+}
+
+json::Value toJSON(const FallThroughInfo &F) {
+    return json::Object{{"function", F.funcName},
+                         {"fromCase", F.fromCase},
+                         {"toCase", F.toCase}};
+}
+
+json::Object toJSON(const std::map<std::string, int> &M) {
+    json::Object O;
+    for (const auto &P : M)
+        O[P.first] = P.second;
+    return O;
+}
+
+json::Value toJSON(const FunctionStats &F) {
+    std::vector<std::string> violations;
+    if (F.isOverlong)          violations.push_back("overlong");
+    if (F.hasTooManyParams)    violations.push_back("tooManyParams");
+    if (F.hasDeepNesting)      violations.push_back("deepNesting");
+    if (F.isBadName)           violations.push_back("badName");
+    if (F.hasRedundantReturn)  violations.push_back("redundantReturn");
+    if (F.hasDeadCode)         violations.push_back("deadCode");
+    if (F.hasFallThrough)      violations.push_back("fallThrough");
+    if (F.isHighCCN)           violations.push_back("highCCN");
+    if (F.isEmptyOrReturnOnly) violations.push_back("emptyOrReturnOnly");
+
+    json::Object O{
+        {"name", F.name},
+        {"lines", F.lines},
+        {"params", F.paramCount},
+        {"ccn", F.ccn},
+        {"localVars", F.localVars},
+        {"maxNesting", F.maxNesting},
+        {"emptyBlocks", F.emptyBlocks},
+        {"controls",
+         json::Object{{"if", F.ifCount},
+                       {"for", F.forCount},
+                       {"while", F.whileCount},
+                       {"doWhile", F.doWhileCount},
+                       {"switch", F.switchCount},
+                       {"case", F.caseCount},
+                       {"logicalAndOr", F.logicalAndOrCount},
+                       {"conditionalOp", F.conditionalOpCount},
+                       {"break", F.breakCount},
+                       {"continue", F.continueCount},
+                       {"return", F.returnCount},
+                       {"goto", F.gotoCount}}},
+        {"calls",
+         json::Object{{"total", F.callCount}, {"targets", toJSON(F.callTargets)}}},
+        {"violations", json::Array(violations)},
+    };
+    return O;
+}
+
+json::Value toJSON(const AnalysisStats &Stats) {
+    double avgCCN = 0;
+    int maxCCN = 0;
+    std::string maxCCNFunc;
+    if (!Stats.functions.empty()) {
+        int total = 0;
+        for (const auto &F : Stats.functions) {
+            total += F.ccn;
+            if (F.ccn > maxCCN) {
+                maxCCN = F.ccn;
+                maxCCNFunc = F.name;
+            }
+        }
+        avgCCN = (double)total / Stats.functions.size();
+    }
+
+    auto violationList = [&](const auto &Items) {
+        return json::Object{{"count", (int)Items.size()}, {"items", json::Array(Items)}};
+    };
+
+    std::vector<json::Value> overlongItems, tooManyParamsItems, deepNestingItems,
+        badNameItems, redundantReturnItems, deadCodeItems, fallThroughItems,
+        highCCNItems, emptyBlockItems, longLineItems;
+    for (const auto &F : Stats.functions) {
+        if (F.isOverlong)
+            overlongItems.push_back(
+                json::Object{{"name", F.name}, {"lines", F.lines}});
+        if (F.hasTooManyParams)
+            tooManyParamsItems.push_back(
+                json::Object{{"name", F.name}, {"params", F.paramCount}});
+        if (F.hasDeepNesting)
+            deepNestingItems.push_back(
+                json::Object{{"name", F.name}, {"depth", F.maxNesting}});
+        if (F.isBadName)
+            badNameItems.push_back(json::Object{{"name", F.name}});
+        if (F.hasRedundantReturn)
+            redundantReturnItems.push_back(json::Object{{"name", F.name}});
+        if (F.hasDeadCode)
+            deadCodeItems.push_back(
+                json::Object{{"name", F.name}, {"count", F.deadStmtCount}});
+        if (F.hasFallThrough)
+            fallThroughItems.push_back(
+                json::Object{{"name", F.name}, {"count", F.fallThroughCount}});
+        if (F.isHighCCN)
+            highCCNItems.push_back(
+                json::Object{{"name", F.name}, {"ccn", F.ccn}});
+    }
+    for (const auto &B : Stats.emptyBlocks)
+        emptyBlockItems.push_back(
+            json::Object{{"function", B.funcName}, {"type", B.type}});
+    for (const auto &L : Stats.longLines)
+        longLineItems.push_back(toJSON(L));
+
+    json::Object Root{
+        {"summary",
+         json::Object{
+             {"totalFunctions", Stats.totalFunctions},
+             {"emptyFunctions", Stats.emptyFunctions},
+             {"paramlessFunctions", Stats.paramlessFunctions},
+             {"paramFunctions", Stats.paramFunctions},
+             {"globalVars", Stats.globalVars},
+             {"localVars", Stats.localVars},
+             {"includeCount", Stats.includeCount},
+             {"avgCCN", avgCCN},
+             {"maxCCN",
+              json::Object{{"function", maxCCNFunc}, {"value", maxCCN}}},
+         }},
+        {"lines",
+         json::Object{
+             {"total", Stats.totalLines},
+             {"code", Stats.codeLines},
+             {"blank", Stats.blankLines},
+             {"singleComment", Stats.singleCommentLines},
+             {"multiComment", Stats.multiCommentLines},
+             {"preprocessor", Stats.preprocessorLines},
+         }},
+        {"controls",
+         json::Object{
+             {"if", Stats.ifCount},
+             {"for", Stats.forCount},
+             {"while", Stats.whileCount},
+             {"doWhile", Stats.doWhileCount},
+             {"switch", Stats.switchCount},
+             {"case", Stats.caseCount},
+             {"logicalAndOr", Stats.logicalAndOrCount},
+             {"conditionalOp", Stats.conditionalOpCount},
+             {"break", Stats.breakCount},
+             {"continue", Stats.continueCount},
+             {"return", Stats.returnCount},
+             {"goto", Stats.gotoCount},
+         }},
+        {"calls",
+         json::Object{
+             {"total", Stats.callCount},
+             {"targets", toJSON(Stats.callTargets)},
+         }},
+        {"violations",
+         json::Object{
+             {"overlongFunctions", violationList(overlongItems)},
+             {"tooManyParams", violationList(tooManyParamsItems)},
+             {"deepNesting", violationList(deepNestingItems)},
+             {"badNames", violationList(badNameItems)},
+             {"badGlobalVarNames",
+              json::Object{
+                  {"count", Stats.badGlobalVarNames},
+                  {"items", json::Array(Stats.badGlobalVars)},
+              }},
+             {"longLines", violationList(longLineItems)},
+             {"redundantReturns", violationList(redundantReturnItems)},
+             {"deadStmts", violationList(deadCodeItems)},
+             {"fallThroughs", violationList(fallThroughItems)},
+             {"highCCN", violationList(highCCNItems)},
+             {"emptyBlocks", violationList(emptyBlockItems)},
+             {"gotoCount", Stats.gotoCount},
+         }},
+        {"functions", json::Array(Stats.functions)},
+    };
+
+    return Root;
+}
+
+json::Value toJSON(const AnalysisResult &R) {
+    json::Value json = toJSON(R.stats);
+    if (auto *O = json.getAsObject()) {
+        if (!R.errors.empty())
+            jsonSet(*O, "errors") = json::Array(R.errors);
+        if (!R.warnings.empty())
+            jsonSet(*O, "warnings") = json::Array(R.warnings);
+        jsonSet(*O, "success") = R.success;
+    }
+    return json;
+}
+
+// ====================== 文本报告 ======================
+
+void printReport(const AnalysisStats &Stats,
+                 const std::vector<std::string> &Files) {
+    outs() << "\n";
+    outs() << "========== C 源文件分析报告 ==========\n\n";
+
+    outs() << "【基本信息】\n";
+    outs() << "  分析文件数: " << Files.size() << "\n";
+    for (const auto &f : Files)
+        outs() << "    - " << f << "\n";
+    outs() << "  总函数数量: " << Stats.totalFunctions << "\n";
+    outs() << "  无参函数:     " << Stats.paramlessFunctions << "\n";
+    outs() << "  有参函数:     " << Stats.paramFunctions << "\n";
+    outs() << "  空函数(无体/仅return): " << Stats.emptyFunctions << "\n";
+    outs() << "  全局变量数量: " << Stats.globalVars << "\n";
+    outs() << "  局部变量数量: " << Stats.localVars << "\n";
+    outs() << "  #include 数量: " << Stats.includeCount << "\n\n";
+
+    // 代码行数统计
+    outs() << "【代码行数统计】\n";
+    outs() << "  总行数:     " << Stats.totalLines << "\n";
+    outs() << "  代码行:     " << Stats.codeLines << "\n";
+    outs() << "  空行:       " << Stats.blankLines << "\n";
+    outs() << "  预处理指令: " << Stats.preprocessorLines << "\n";
+    int totalComment = Stats.singleCommentLines + Stats.multiCommentLines;
+    outs() << "  注释行:     " << totalComment << "\n";
+    outs() << "    - 单行(//): " << Stats.singleCommentLines << "\n";
+    outs() << "    - 多行(/**/): " << Stats.multiCommentLines << "\n\n";
+
+    // 代码规范检查
+    outs() << "【代码规范检查】\n";
+    outs() << "  函数行数上限(" << MAX_FUNCTION_LINES << "行): ";
+    if (Stats.overlongFunctions == 0) {
+        outs() << "= 全部在限制内\n";
+    } else {
+        outs() << "= 发现 " << Stats.overlongFunctions << " 个超标\n";
+        for (const auto &F : Stats.functions) {
+            if (F.isOverlong)
+                outs() << "    - " << F.name << "(): " << F.lines << " 行 (超标 "
+                        << (F.lines - MAX_FUNCTION_LINES) << " 行)\n";
+        }
+    }
+    outs() << "\n";
+
+    outs() << "  goto 语句:   ";
+    if (Stats.gotoCount == 0) {
+        outs() << "= 未使用\n";
+    } else {
+        outs() << "= 发现 " << Stats.gotoCount << " 处\n";
+        for (const auto &F : Stats.functions) {
+            if (F.gotoCount > 0)
+                outs() << "    - " << F.name << "(): " << F.gotoCount << " 处\n";
+        }
+    }
+
+    outs() << "  函数参数上限(" << MAX_PARAMS << "个): ";
+    if (Stats.tooManyParamsFunctions == 0) {
+        outs() << "= 全部在限制内\n";
+    } else {
+        outs() << "= 发现 " << Stats.tooManyParamsFunctions << " 个超标\n";
+        for (const auto &F : Stats.functions) {
+            if (F.hasTooManyParams)
+                outs() << "    - " << F.name << "(): " << F.paramCount
+                       << " 个参数 (超标 " << (F.paramCount - MAX_PARAMS) << " 个)\n";
+        }
+    }
+
+    outs() << "  嵌套深度上限(" << MAX_NESTING << "): ";
+    if (Stats.deepNestingFunctions == 0) {
+        outs() << "= 全部在限制内\n";
+    } else {
+        outs() << "= 发现 " << Stats.deepNestingFunctions << " 个超标\n";
+        for (const auto &F : Stats.functions) {
+            if (F.hasDeepNesting)
+                outs() << "    - " << F.name << "(): 最大嵌套 " << F.maxNesting
+                       << " 层 (超标 " << (F.maxNesting - MAX_NESTING) << " 层)\n";
+        }
+    }
+
+    outs() << "  命名规范:   ";
+    if (Stats.badNamedFunctions == 0) {
+        outs() << "= 全部符合 snake_case\n";
+    } else {
+        outs() << "= 发现 " << Stats.badNamedFunctions << " 个不规范\n";
+        for (const auto &F : Stats.functions) {
+            if (F.isBadName)
+                outs() << "    - " << F.name << "(): 应使用小写下划线风格\n";
+        }
+    }
+
+    outs() << "  全局变量命名: ";
+    if (Stats.badGlobalVarNames == 0) {
+        outs() << "= 全部有 g_ 前缀\n";
+    } else {
+        outs() << "= 发现 " << Stats.badGlobalVarNames << " 个缺少 g_ 前缀\n";
+        for (const auto &name : Stats.badGlobalVars)
+            outs() << "    - " << name << " -> 应改为 g_" << name << "\n";
+    }
+
+    outs() << "  单行长度(" << MAX_LINE_LENGTH << "字符): ";
+    if (Stats.longLineCount == 0) {
+        outs() << "= 全部在限制内\n";
+    } else {
+        outs() << "= 发现 " << Stats.longLineCount << " 行超标\n";
+        for (const auto &L : Stats.longLines)
+            outs() << "    - " << L.file << ":" << L.lineNum
+                   << " (" << L.length << " 字符)\n";
+    }
+
+    outs() << "  冗余 return: ";
+    if (Stats.redundantReturns == 0) {
+        outs() << "= 未发现\n";
+    } else {
+        outs() << "= 发现 " << Stats.redundantReturns << " 处\n";
+        for (const auto &F : Stats.functions) {
+            if (F.hasRedundantReturn) {
+                if (F.name == "main")
+                    outs() << "    - main(): 末尾 return 0; 是多余的 (C99+ 隐式返回0)\n";
+                else
+                    outs() << "    - " << F.name << "(): void 函数末尾 return; 是多余的\n";
+            }
+        }
+    }
+
+    outs() << "  switch穿透: ";
+    if (Stats.fallThroughCount == 0) {
+        outs() << "= 未发现\n";
+    } else {
+        outs() << "= 发现 " << Stats.fallThroughCount << " 处\n";
+        for (const auto &F : Stats.functions) {
+            if (F.hasFallThrough)
+                outs() << "    - " << F.name << "(): " << F.fallThroughCount
+                       << " 处穿透\n";
+        }
+    }
+
+    outs() << "  死代码:     ";
+    if (Stats.deadStmts == 0) {
+        outs() << "= 未发现\n";
+    } else {
+        outs() << "= 发现 " << Stats.deadStmts << " 条不可达语句\n";
+        for (const auto &F : Stats.functions) {
+            if (F.hasDeadCode)
+                outs() << "    - " << F.name << "(): " << F.deadStmtCount
+                       << " 条语句在不可达路径上\n";
+        }
+    }
+
+    outs() << "  空代码块:   ";
+    if (Stats.emptyBlockCount == 0) {
+        outs() << "= 未发现\n";
+    } else {
+        outs() << "= 发现 " << Stats.emptyBlockCount << " 处\n";
+        for (const auto &B : Stats.emptyBlocks)
+            outs() << "    - " << B.funcName << "(): " << B.type << " 空块\n";
+    }
+
+    outs() << "  圈复杂度上限(" << MAX_CCN << "): ";
+    if (Stats.highCCNFunctions == 0) {
+        outs() << "= 全部在限制内\n";
+    } else {
+        outs() << "= 发现 " << Stats.highCCNFunctions << " 个超标\n";
+        for (const auto &F : Stats.functions) {
+            if (F.isHighCCN)
+                outs() << "    - " << F.name << "(): CCN=" << F.ccn
+                       << " (超标 " << (F.ccn - MAX_CCN) << ")\n";
+        }
+    }
+
+    outs() << "\n";
+
+    // 逐函数统计
+    outs() << "【逐函数统计】\n";
+    if (Stats.functions.empty()) {
+        outs() << "  (无)\n\n";
+    } else {
+        for (const auto &F : Stats.functions) {
+            outs() << "  --- " << F.name << "() -- " << F.lines << " 行"
+                   << ", " << (F.paramCount > 0
+                                ? std::to_string(F.paramCount) + " 参数"
+                                : "无参")
+                   << ", CCN=" << F.ccn
+                   << (F.isEmptyOrReturnOnly ? " [空/仅return]" : "")
+                   << (F.isOverlong ? " = 行数超标" : "")
+                   << (F.isHighCCN ? " = 圈复杂度过高" : "")
+                   << (F.isBadName ? " = 命名不规范" : "")
+                   << (F.hasTooManyParams ? " = 参数过多" : "")
+                   << (F.hasDeepNesting ? " = 嵌套过深" : "")
+                   << (F.hasDeadCode ? " = 含死代码" : "")
+                   << (F.hasFallThrough ? " = switch穿透" : "")
+                   << " ---\n";
+            outs() << "    局部变量: " << F.localVars
+                   << "  嵌套深度: " << F.maxNesting << "\n";
+
+            outs() << "    分支/循环:";
+            if (F.ifCount)      outs() << " if:"      << F.ifCount;
+            if (F.forCount)     outs() << " for:"     << F.forCount;
+            if (F.whileCount)   outs() << " while:"   << F.whileCount;
+            if (F.doWhileCount) outs() << " do-while:"<< F.doWhileCount;
+            if (F.switchCount)  outs() << " switch:"  << F.switchCount;
+            if (F.caseCount)    outs() << " case:"    << F.caseCount;
+            if (F.logicalAndOrCount) outs() << " &&/||:" << F.logicalAndOrCount;
+            if (F.conditionalOpCount) outs() << " ?::" << F.conditionalOpCount;
+            if (F.breakCount)   outs() << " break:"   << F.breakCount;
+            if (F.continueCount)outs() << " continue:"<< F.continueCount;
+            if (F.returnCount)  outs() << " return:"  << F.returnCount;
+            if (F.gotoCount)    outs() << " goto:"    << F.gotoCount;
+            if (F.ifCount == 0 && F.forCount == 0 && F.whileCount == 0 &&
+                F.doWhileCount == 0 && F.switchCount == 0 && F.caseCount == 0 &&
+                F.logicalAndOrCount == 0 && F.conditionalOpCount == 0 &&
+                F.breakCount == 0 && F.continueCount == 0 &&
+                F.returnCount == 0 && F.gotoCount == 0)
+                outs() << " (无)";
+            outs() << "\n";
+
+            outs() << "    函数调用: " << F.callCount << " 次";
+            if (!F.callTargets.empty()) {
+                bool first = true;
+                for (const auto &p : F.callTargets) {
+                    outs() << (first ? " (" : ", ") << p.first << ":" << p.second;
+                    first = false;
+                }
+                outs() << ")";
+            }
+            outs() << "\n\n";
+        }
+
+        if (!Stats.functions.empty()) {
+            int totalCCN = 0;
+            int maxCCN = 0;
+            std::string maxCCNFunc;
+            for (const auto &F : Stats.functions) {
+                totalCCN += F.ccn;
+                if (F.ccn > maxCCN) {
+                    maxCCN = F.ccn;
+                    maxCCNFunc = F.name;
+                }
+            }
+            double avgCCN = (double)totalCCN / Stats.functions.size();
+            outs() << "  平均圈复杂度: " << format("%.1f", avgCCN);
+            outs() << "  最高: " << maxCCNFunc << "() = " << maxCCN << "\n";
+        }
+    }
+
+    // 全局汇总
+    outs() << "【控制流语句统计（全局汇总）】\n";
+    outs() << "  if 语句:       " << Stats.ifCount << "\n";
+    outs() << "  for 语句:      " << Stats.forCount << "\n";
+    outs() << "  while 语句:    " << Stats.whileCount << "\n";
+    outs() << "  do-while 语句: " << Stats.doWhileCount << "\n";
+    outs() << "  switch 语句:   " << Stats.switchCount << "\n";
+    outs() << "  case 标签:     " << Stats.caseCount << "\n";
+    outs() << "  && / || 运算:  " << Stats.logicalAndOrCount << "\n";
+    outs() << "  ?: 三元运算:   " << Stats.conditionalOpCount << "\n";
+    outs() << "  break 语句:    " << Stats.breakCount << "\n";
+    outs() << "  continue 语句: " << Stats.continueCount << "\n";
+    outs() << "  return 语句:   " << Stats.returnCount << "\n";
+    outs() << "  goto 语句:     " << Stats.gotoCount << "\n";
+    int total = Stats.ifCount + Stats.forCount + Stats.whileCount
+              + Stats.doWhileCount + Stats.switchCount
+              + Stats.caseCount + Stats.logicalAndOrCount
+              + Stats.conditionalOpCount
+              + Stats.breakCount + Stats.continueCount
+              + Stats.returnCount + Stats.gotoCount;
+    outs() << "  合计:          " << total << "\n\n";
+
+    outs() << "【函数调用统计（全局汇总）】\n";
+    outs() << "  总调用次数: " << Stats.callCount << "\n";
+    if (!Stats.callTargets.empty()) {
+        outs() << "  调用分布:\n";
+        for (const auto &p : Stats.callTargets)
+            outs() << "    " << p.first << "(): " << p.second << " 次\n";
+    }
+    outs() << "\n========================================\n";
+}
+
+// ====================== 行分类 ======================
+
+void classifyLines(const std::string &SourceText,
+                   const std::string &DisplayName,
+                   AnalysisStats &Stats) {
+    std::istringstream src(SourceText);
+    std::string line;
+    int lineNum = 0;
+    bool inBlockComment = false;
+    while (std::getline(src, line)) {
+        lineNum++;
+        int len = line.length();
+        Stats.totalLines++;
+
+        if (len > MAX_LINE_LENGTH) {
+            Stats.longLineCount++;
+            Stats.longLines.push_back({DisplayName, lineNum, len});
+        }
+
+        size_t first = line.find_first_not_of(" \t\r");
+        if (first == std::string::npos) {
+            Stats.blankLines++;
+            continue;
+        }
+
+        if (inBlockComment) {
+            Stats.multiCommentLines++;
+            if (line.find("*/") != std::string::npos)
+                inBlockComment = false;
+            continue;
+        }
+
+        std::string trimmed = line.substr(first);
+        if (trimmed.compare(0, 2, "//") == 0) {
+            Stats.singleCommentLines++;
+            continue;
+        }
+
+        if (trimmed[0] == '#') {
+            Stats.preprocessorLines++;
+            continue;
+        }
+
+        bool isComment = false;
+        size_t bs = line.find("/*");
+        if (bs != std::string::npos) {
+            size_t be = line.find("*/", bs + 2);
+            std::string before = line.substr(0, bs);
+            bool hasCodeBefore = (before.find_first_not_of(" \t\r") != std::string::npos);
+            if (be != std::string::npos) {
+                std::string after = line.substr(be + 2);
+                bool hasCodeAfter = (after.find_first_not_of(" \t\r") != std::string::npos);
+                if (!hasCodeBefore && !hasCodeAfter) {
+                    Stats.multiCommentLines++;
+                    isComment = true;
+                }
+            } else {
+                if (!hasCodeBefore) {
+                    Stats.multiCommentLines++;
+                    isComment = true;
+                }
+                inBlockComment = true;
+            }
+        }
+        if (!isComment)
+            Stats.codeLines++;
+    }
+}
