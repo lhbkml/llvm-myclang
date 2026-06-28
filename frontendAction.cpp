@@ -1,6 +1,8 @@
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "clang/Frontend/CompilerInstance.h"
@@ -48,6 +50,28 @@ static cl::opt<int>
     MaxNesting("max-nesting", cl::desc("Maximum nesting depth (default 4)"),
                cl::init(kDefaultThresholds.maxNesting));
 
+static cl::opt<std::string>
+    ProjectDir("project", cl::desc("Analyze all .c files in a directory tree"));
+
+// ====================== 目录扫描 ======================
+static void collectCFiles(const std::string &Dir, std::vector<std::string> &Files) {
+    std::error_code EC;
+    for (llvm::sys::fs::directory_iterator It(Dir, EC), End;
+         It != End && !EC; It.increment(EC)) {
+        if (EC) break;
+        llvm::sys::fs::file_status St;
+        if (llvm::sys::fs::status(It->path(), St)) continue;
+        if (St.type() == llvm::sys::fs::file_type::regular_file) {
+            if (StringRef(It->path()).endswith(".c"))
+                Files.push_back(It->path().str());
+        } else if (St.type() == llvm::sys::fs::file_type::directory_file) {
+            StringRef DirName = llvm::sys::path::filename(It->path());
+            if (DirName != "." && DirName != "..")
+                collectCFiles(It->path().str(), Files);
+        }
+    }
+}
+
 // ====================== main ======================
 int main(int argc, char **argv) {
     cl::ParseCommandLineOptions(argc, argv, "Clang C File Analyzer\n");
@@ -59,6 +83,93 @@ int main(int argc, char **argv) {
     thresh.maxParams        = MaxParams;
     thresh.maxNesting       = MaxNesting;
 
+    // ===== 项目模式：递归扫描目录下所有 .c 文件 =====
+    if (!ProjectDir.empty()) {
+        if (ReadFromStdin) {
+            std::cerr << "--project and --stdin are mutually exclusive\n";
+            return 1;
+        }
+
+        std::vector<std::string> projectFiles;
+        collectCFiles(ProjectDir, projectFiles);
+
+        if (projectFiles.empty()) {
+            std::cerr << "No .c files found in " << ProjectDir << "\n";
+            return 1;
+        }
+
+        std::cerr << "Found " << projectFiles.size() << " .c file(s) in "
+                  << ProjectDir << "\n";
+
+        std::vector<const char *> FakeArgs = {
+            "frontendAction",
+            "-fsyntax-only",
+            projectFiles[0].c_str(),
+        };
+
+        CompilerInstance TmpCI;
+        TmpCI.createDiagnostics();
+
+        auto Invocation = std::make_shared<CompilerInvocation>();
+        if (!CompilerInvocation::CreateFromArgs(*Invocation, FakeArgs,
+                                                 TmpCI.getDiagnostics())) {
+            std::cerr << "Failed to parse compiler arguments\n";
+            return 1;
+        }
+
+        AnalysisStats totalStats;
+        std::vector<std::string> succeeded;
+        std::vector<std::string> allErrors;
+
+        for (const auto &f : projectFiles) {
+            AnalysisResult result = analyzeFile(f, *Invocation, thresh);
+            if (result.success) {
+                totalStats += result.stats;
+                succeeded.push_back(f);
+            } else {
+                std::cerr << "[FAIL] " << f << "\n";
+                for (const auto &e : result.errors) {
+                    allErrors.push_back(f + ": " + e);
+                }
+            }
+        }
+
+        std::cerr << "Analyzed " << succeeded.size() << "/" << projectFiles.size()
+                  << " file(s) successfully\n";
+
+        if (succeeded.empty()) {
+            if (JsonOutput) {
+                json::Value json = toJSON(totalStats, thresh);
+                if (auto *O = json.getAsObject()) {
+                    jsonSet(*O, "files") = json::Array(succeeded);
+                    jsonSet(*O, "errors") = json::Array(allErrors);
+                    jsonSet(*O, "project") = ProjectDir;
+                }
+                outs() << formatv("{0:2}", json) << "\n";
+            } else {
+                std::cerr << "Failed to analyze any file\n";
+            }
+            return 1;
+        }
+
+        if (JsonOutput) {
+            json::Value json = toJSON(totalStats, thresh);
+            if (auto *O = json.getAsObject()) {
+                jsonSet(*O, "files") = json::Array(succeeded);
+                jsonSet(*O, "project") = ProjectDir;
+                if (!allErrors.empty())
+                    jsonSet(*O, "errors") = json::Array(allErrors);
+            }
+            outs() << formatv("{0:2}", json) << "\n";
+        } else {
+            outs() << "Project: " << ProjectDir << "\n";
+            printReport(totalStats, succeeded, thresh);
+        }
+
+        return 0;
+    }
+
+    // ===== 单文件模式 =====
     if (!ReadFromStdin && InputFiles.empty()) {
         std::cerr << "No input files\n";
         return 1;
