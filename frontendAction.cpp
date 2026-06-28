@@ -239,8 +239,9 @@ int main(int argc, char **argv) {
         std::vector<const char *> FakeArgs = {
             "frontendAction",
             "-fsyntax-only",
-            "-resource-dir", "/usr/lib/llvm-18/lib/clang/18",
+            "-isystem", "/usr/lib/llvm-18/lib/clang/18/include",
             "-isystem", "/usr/include",
+            "-isystem", "/usr/include/x86_64-linux-gnu",
             projectFiles[0].c_str(),
         };
 
@@ -347,8 +348,9 @@ int main(int argc, char **argv) {
     std::vector<const char *> FakeArgs = {
         "frontendAction",
         "-fsyntax-only",
-        "-resource-dir", "/usr/lib/llvm-18/lib/clang/18",
+        "-isystem", "/usr/lib/llvm-18/lib/clang/18/include",
         "-isystem", "/usr/include",
+        "-isystem", "/usr/include/x86_64-linux-gnu",
         InputFiles.empty() ? "stdin.c" : InputFiles[0].c_str(),
     };
 
