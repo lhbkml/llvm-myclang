@@ -68,7 +68,7 @@ modeBtns.forEach(btn => {
 selectFilesBtn.addEventListener("click", () => fileInput.click());
 
 fileInput.addEventListener("change", () => {
-    selectedFiles = Array.from(fileInput.files).filter(f => f.name.endsWith(".c"));
+    selectedFiles = Array.from(fileInput.files).filter(f => f.name.endsWith(".c") || f.name.endsWith(".h"));
     renderFileList();
 });
 
@@ -77,7 +77,7 @@ uploadZone.addEventListener("dragleave", () => uploadZone.classList.remove("drag
 uploadZone.addEventListener("drop", e => {
     e.preventDefault();
     uploadZone.classList.remove("drag-over");
-    const dropped = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith(".c"));
+    const dropped = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith(".c") || f.name.endsWith(".h"));
     if (dropped.length > 0) {
         selectedFiles = [...selectedFiles, ...dropped];
         renderFileList();

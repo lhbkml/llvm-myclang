@@ -82,15 +82,15 @@ def analyze_project():
     if not files:
         return jsonify({"success": False, "error": "未上传文件"}), 400
 
-    # 过滤 .c 文件
-    cFiles = [f for f in files if f.filename.endswith(".c")]
-    if not cFiles:
+    # 过滤 .c/.h 文件
+    srcFiles = [f for f in files if f.filename.endswith(".c") or f.filename.endswith(".h")]
+    if not any(f.filename.endswith(".c") for f in srcFiles):
         return jsonify({"success": False, "error": "未找到 .c 文件"}), 400
 
     # 创建临时目录
     tmpDir = tempfile.mkdtemp(prefix="myclang_")
     try:
-        for f in cFiles:
+        for f in srcFiles:
             # 只保留文件名，避免路径穿越
             safeName = os.path.basename(f.filename)
             f.save(os.path.join(tmpDir, safeName))
