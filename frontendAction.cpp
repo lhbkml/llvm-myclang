@@ -2,6 +2,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -13,6 +14,7 @@
 #include "report.h"
 
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -53,6 +55,148 @@ static cl::opt<int>
 static cl::opt<std::string>
     ProjectDir("project", cl::desc("Analyze all .c files in a directory tree"));
 
+static cl::opt<std::string>
+    CDBPath("cdb", cl::desc("Path to compile_commands.json for per-file compiler flags"));
+
+// ====================== 命令分词 ======================
+// 将 shell 命令字符串拆分为参数数组（处理引号和转义）
+static std::vector<std::string> tokenizeCommand(const std::string &Cmd) {
+    std::vector<std::string> Tokens;
+    std::string Cur;
+    char Quote = 0;
+    for (size_t i = 0; i < Cmd.size(); ++i) {
+        char c = Cmd[i];
+        if (Quote) {
+            if (c == '\\' && Quote == '"' && i + 1 < Cmd.size() &&
+                (Cmd[i + 1] == '"' || Cmd[i + 1] == '\\')) {
+                Cur += Cmd[++i];
+            } else if (c == Quote) {
+                Quote = 0;
+            } else {
+                Cur += c;
+            }
+        } else {
+            if (c == '"' || c == '\'') {
+                Quote = c;
+            } else if (c == ' ' || c == '\t') {
+                if (!Cur.empty()) { Tokens.push_back(Cur); Cur.clear(); }
+            } else {
+                Cur += c;
+            }
+        }
+    }
+    if (!Cur.empty()) Tokens.push_back(Cur);
+    return Tokens;
+}
+
+// ====================== compile_commands.json 解析 ======================
+struct CompileCommand {
+    std::string file;
+    std::string directory;
+    std::vector<std::string> args;  // 处理后的 Clang 参数
+};
+
+static std::vector<CompileCommand> parseCompileCommands(const std::string &Path) {
+    std::vector<CompileCommand> result;
+
+    auto Buf = MemoryBuffer::getFile(Path);
+    if (!Buf) {
+        std::cerr << "Cannot read " << Path << ": "
+                  << Buf.getError().message() << "\n";
+        return result;
+    }
+
+    auto Json = json::parse((*Buf)->getBuffer());
+    if (!Json) {
+        std::cerr << "Invalid JSON in " << Path << ": "
+                  << toString(Json.takeError()) << "\n";
+        return result;
+    }
+
+    auto *Arr = Json->getAsArray();
+    if (!Arr) {
+        std::cerr << Path << " is not a JSON array\n";
+        return result;
+    }
+
+    for (auto &Elem : *Arr) {
+        auto *Obj = Elem.getAsObject();
+        if (!Obj) continue;
+
+        auto File = Obj->getString("file");
+        auto Dir  = Obj->getString("directory");
+        if (!File) continue;
+
+        CompileCommand CC;
+        CC.file = File->str();
+        CC.directory = Dir ? Dir->str() : std::string();
+
+        // 支持两种格式：command（字符串）和 arguments（数组）
+        std::vector<std::string> rawArgs;
+        if (auto Cmd = Obj->getString("command")) {
+            rawArgs = tokenizeCommand(Cmd->str());
+        } else if (auto *ArgsVal = Obj->get("arguments")) {
+            if (auto *ArgsArr = ArgsVal->getAsArray()) {
+                for (auto &A : *ArgsArr) {
+                    if (auto S = A.getAsString())
+                        rawArgs.push_back(S->str());
+                }
+            } else {
+                continue;
+            }
+        } else {
+            continue;
+        }
+
+        if (rawArgs.empty()) continue;
+
+        // 过滤并转换参数：去掉编译器名/-c/-o/源文件，解析相对 -I 路径
+        CC.args.push_back("clang");
+        CC.args.push_back("-fsyntax-only");
+        bool skipNext = false;
+        for (size_t i = 0; i < rawArgs.size(); ++i) {
+            const std::string &arg = rawArgs[i];
+            if (skipNext) { skipNext = false; continue; }
+            // 跳过编译器二进制
+            if (i == 0 && (arg.find("cc") != std::string::npos ||
+                           arg.find("gcc") != std::string::npos ||
+                           arg.find("clang") != std::string::npos ||
+                           arg.find("++") != std::string::npos))
+                continue;
+            // 跳过 -c, -o <file>, 源文件名
+            if (arg == "-c") continue;
+            if (arg == "-o") { skipNext = true; continue; }
+            if (arg == CC.file || arg == " " + CC.file) continue;
+            StringRef argRef(arg);
+            if (argRef.ends_with(".c") || argRef.ends_with(".i")) {
+                // 可能是源文件路径
+                std::string fileName = llvm::sys::path::filename(arg).str();
+                std::string ccFileName = llvm::sys::path::filename(CC.file).str();
+                if (fileName == ccFileName) continue;
+            }
+            // 解析相对 -I 路径为绝对路径
+            if (arg.size() >= 2 && arg[0] == '-' && arg[1] == 'I') {
+                std::string incPath = arg.substr(2);
+                if (incPath.empty() && i + 1 < rawArgs.size()) {
+                    incPath = rawArgs[++i];
+                }
+                if (!incPath.empty() && !llvm::sys::path::is_absolute(incPath) &&
+                    !CC.directory.empty()) {
+                    SmallString<256> AbsPath(CC.directory);
+                    llvm::sys::path::append(AbsPath, incPath);
+                    CC.args.push_back("-I" + std::string(AbsPath));
+                    continue;
+                }
+            }
+            CC.args.push_back(arg);
+        }
+
+        result.push_back(std::move(CC));
+    }
+
+    return result;
+}
+
 // ====================== 目录扫描 ======================
 static void collectCFiles(const std::string &Dir, std::vector<std::string> &Files) {
     std::error_code EC;
@@ -65,7 +209,7 @@ static void collectCFiles(const std::string &Dir, std::vector<std::string> &File
         llvm::sys::fs::file_status St;
         if (llvm::sys::fs::status(Path, St)) continue;
         if (St.type() == llvm::sys::fs::file_type::regular_file) {
-            if (StringRef(Path).endswith(".c"))
+            if (StringRef(Path).ends_with(".c"))
                 Files.push_back(Path);
         } else if (St.type() == llvm::sys::fs::file_type::directory_file) {
             StringRef DirName = llvm::sys::path::filename(Path);
@@ -104,6 +248,17 @@ int main(int argc, char **argv) {
         std::cerr << "Found " << projectFiles.size() << " .c file(s) in "
                   << ProjectDir << "\n";
 
+        // 加载 compile_commands.json（如果指定）
+        std::map<std::string, CompileCommand> cdbMap;
+        if (!CDBPath.empty()) {
+            auto entries = parseCompileCommands(CDBPath);
+            for (auto &e : entries)
+                cdbMap[std::string(llvm::sys::path::filename(e.file))] = std::move(e);
+            std::cerr << "Loaded " << entries.size()
+                      << " entries from " << CDBPath << "\n";
+        }
+
+        // 共享 Invocation 作为 fallback
         std::vector<const char *> FakeArgs = {
             "frontendAction",
             "-fsyntax-only",
@@ -113,8 +268,8 @@ int main(int argc, char **argv) {
         CompilerInstance TmpCI;
         TmpCI.createDiagnostics();
 
-        auto Invocation = std::make_shared<CompilerInvocation>();
-        if (!CompilerInvocation::CreateFromArgs(*Invocation, FakeArgs,
+        auto SharedInvocation = std::make_shared<CompilerInvocation>();
+        if (!CompilerInvocation::CreateFromArgs(*SharedInvocation, FakeArgs,
                                                  TmpCI.getDiagnostics())) {
             std::cerr << "Failed to parse compiler arguments\n";
             return 1;
@@ -125,7 +280,27 @@ int main(int argc, char **argv) {
         std::vector<std::string> allErrors;
 
         for (const auto &f : projectFiles) {
-            AnalysisResult result = analyzeFile(f, *Invocation, thresh);
+            // 查找该文件在 compile_commands.json 中的条目
+            std::string fname = llvm::sys::path::filename(f).str();
+            const CompilerInvocation *Invoke = SharedInvocation.get();
+            CompilerInstance PerFileCI;
+            std::shared_ptr<CompilerInvocation> PerFileInvocation;
+
+            auto it = cdbMap.find(fname);
+            if (it != cdbMap.end()) {
+                std::vector<const char *> cArgs;
+                for (auto &a : it->second.args)
+                    cArgs.push_back(a.c_str());
+
+                PerFileCI.createDiagnostics();
+                PerFileInvocation = std::make_shared<CompilerInvocation>();
+                if (CompilerInvocation::CreateFromArgs(*PerFileInvocation, cArgs,
+                                                       PerFileCI.getDiagnostics())) {
+                    Invoke = PerFileInvocation.get();
+                }
+            }
+
+            AnalysisResult result = analyzeFile(f, *Invoke, thresh);
             if (result.success) {
                 totalStats += result.stats;
                 succeeded.push_back(f);
