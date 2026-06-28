@@ -1,0 +1,5 @@
+[
+  {"directory": "/app/output", "command": "gcc -I/app/output -DTEST_MODE -c test.c", "file": "/app/output/test.c"},
+  {"directory": "/app/output", "command": "gcc -c sum.c", "file": "/app/output/sum.c"},
+  {"directory": "/app/output", "command": "gcc -DMAX_ITEMS=100 -c test_ccn.c", "file": "/app/output/test_ccn.c"}
+]
