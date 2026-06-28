@@ -22,8 +22,11 @@ RUN make clean && make frontendAction
 FROM ubuntu:noble
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libclang-cpp18 libllvm18 && \
+    libclang-cpp18 libllvm18 libc6-dev && \
     rm -rf /var/lib/apt/lists/*
+
+# 从 builder 拷贝 Clang 内置头文件（stddef.h 等）
+COPY --from=builder /usr/lib/llvm-18/lib/clang/18/include /usr/lib/llvm-18/lib/clang/18/include
 
 WORKDIR /app
 COPY --from=builder /src/frontendAction /src/output ./output/

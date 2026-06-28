@@ -1,0 +1,7 @@
+[
+  {"directory": "/project", "command": "gcc -I/project -std=c11 -c main.c",  "file": "main.c"},
+  {"directory": "/project", "command": "gcc -I/project -std=c11 -c snake.c", "file": "snake.c"},
+  {"directory": "/project", "command": "gcc -I/project -std=c11 -c board.c", "file": "board.c"},
+  {"directory": "/project", "command": "gcc -I/project -std=c11 -c input.c", "file": "input.c"},
+  {"directory": "/project", "command": "gcc -I/project -std=c11 -c food.c",  "file": "food.c"}
+]
