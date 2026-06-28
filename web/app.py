@@ -32,13 +32,16 @@ def run_analysis(code: str, thresholds: dict) -> dict:
             text=True,
             timeout=30,
         )
-        if result.returncode != 0:
-            return {"success": False, "error": result.stderr or "分析失败"}
-        return json.loads(result.stdout)
+        # 即使 returncode != 0，工具仍会输出 JSON（success=false + errors 字段）
+        try:
+            data = json.loads(result.stdout)
+            return data
+        except json.JSONDecodeError:
+            if result.returncode != 0:
+                return {"success": False, "error": result.stderr or result.stdout[:200] or "分析失败"}
+            return {"success": False, "error": f"解析结果失败: {result.stdout[:200]}"}
     except subprocess.TimeoutExpired:
         return {"success": False, "error": "分析超时（30秒）"}
-    except json.JSONDecodeError:
-        return {"success": False, "error": f"解析结果失败: {result.stdout[:200]}"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
