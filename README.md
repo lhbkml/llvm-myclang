@@ -160,6 +160,8 @@ myclang-c++
 | v6.3 | Docker 容器化 |
 | v6.4 | 多文件模块化拆分（1→10 文件） |
 | v6.5 | 运行时阈值配置 + Web 前端 |
+| v7.0 | 项目级目录扫描 — --project 参数 |
+| v7.1 | compile_commands.json 集成 — --cdb 参数 |
 
 ## License
 
