@@ -1,14 +1,16 @@
 """
-myclang-cc Web 前端
-方案 B+2: Flask API + 独立前端页面，ECS 直接运行
+myclang-cc Web 前端 v7.2
+支持单文件分析 + 项目模式（多文件上传 + compile_commands.json）
 
-启动: pip install flask && python app.py
+启动: .venv/bin/pip install flask && .venv/bin/python3 app.py
 访问: http://<ECS_IP>:5000
 """
 
 import subprocess
 import json
 import os
+import tempfile
+import shutil
 from flask import Flask, render_template, request, jsonify
 
 app = Flask(__name__)
@@ -16,63 +18,101 @@ app = Flask(__name__)
 DOCKER_IMAGE = os.environ.get("MYCLANG_IMAGE", "myclang-cc")
 DOCKER_CMD = ["docker", "run", "--rm", "-i", DOCKER_IMAGE, "--stdin", "--json"]
 
+THRESHOLD_KEYS = ["max-lines", "max-line-length", "max-ccn", "max-params", "max-nesting"]
 
-def run_analysis(code: str, thresholds: dict) -> dict:
-    """调用 Docker 执行代码分析，返回 JSON 结果"""
-    cmd = list(DOCKER_CMD)
-    for key, val in thresholds.items():
+
+def _build_threshold_args(data: dict) -> list:
+    """从请求数据中提取阈值参数"""
+    args = []
+    mapping = {
+        "maxLines": "max-lines", "maxLineLength": "max-line-length",
+        "maxCcn": "max-ccn", "maxParams": "max-params", "maxNesting": "max-nesting",
+    }
+    for jsonKey, cliKey in mapping.items():
+        val = data.get(jsonKey)
         if val is not None and val != "":
-            cmd.extend([f"--{key}", str(val)])
+            args.extend([f"--{cliKey}", str(int(val))])
+    return args
 
+
+def _run_docker(cmd: list, stdin_text: str = None) -> dict:
+    """运行 Docker 命令，解析 JSON 输出"""
     try:
-        result = subprocess.run(
-            cmd,
-            input=code,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        # 即使 returncode != 0，工具仍会输出 JSON（success=false + errors 字段）
+        result = subprocess.run(cmd, input=stdin_text, capture_output=True,
+                                text=True, timeout=60)
         try:
-            data = json.loads(result.stdout)
-            return data
+            return json.loads(result.stdout)
         except json.JSONDecodeError:
             if result.returncode != 0:
-                return {"success": False, "error": result.stderr or result.stdout[:200] or "分析失败"}
+                return {"success": False,
+                        "error": result.stderr or result.stdout[:200] or "分析失败"}
             return {"success": False, "error": f"解析结果失败: {result.stdout[:200]}"}
     except subprocess.TimeoutExpired:
-        return {"success": False, "error": "分析超时（30秒）"}
+        return {"success": False, "error": "分析超时（60秒）"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
+# ====================== 路由 ======================
+
 @app.route("/")
 def index():
-    """首页"""
     return render_template("index.html")
 
 
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
-    """代码分析 API"""
+    """单文件分析（粘贴代码）"""
     data = request.get_json()
     if not data or "code" not in data:
         return jsonify({"success": False, "error": "缺少 code 字段"}), 400
 
-    code = data["code"]
-    if not code.strip():
+    code = data["code"].strip()
+    if not code:
         return jsonify({"success": False, "error": "代码为空"}), 400
 
-    thresholds = {
-        "max-lines": data.get("maxLines"),
-        "max-line-length": data.get("maxLineLength"),
-        "max-ccn": data.get("maxCcn"),
-        "max-params": data.get("maxParams"),
-        "max-nesting": data.get("maxNesting"),
-    }
+    cmd = list(DOCKER_CMD) + _build_threshold_args(data)
+    return jsonify(_run_docker(cmd, stdin_text=code))
 
-    result = run_analysis(code, thresholds)
-    return jsonify(result)
+
+@app.route("/api/analyze-project", methods=["POST"])
+def analyze_project():
+    """项目模式：上传多个 .c 文件 + 可选 compile_commands.json"""
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"success": False, "error": "未上传文件"}), 400
+
+    # 过滤 .c 文件
+    cFiles = [f for f in files if f.filename.endswith(".c")]
+    if not cFiles:
+        return jsonify({"success": False, "error": "未找到 .c 文件"}), 400
+
+    # 创建临时目录
+    tmpDir = tempfile.mkdtemp(prefix="myclang_")
+    try:
+        for f in cFiles:
+            # 只保留文件名，避免路径穿越
+            safeName = os.path.basename(f.filename)
+            f.save(os.path.join(tmpDir, safeName))
+
+        # compile_commands.json
+        cdbFile = request.files.get("cdb")
+        hasCdb = False
+        if cdbFile and cdbFile.filename.endswith(".json"):
+            cdbFile.save(os.path.join(tmpDir, "compile_commands.json"))
+            hasCdb = True
+
+        # Docker 参数
+        dockerArgs = ["docker", "run", "--rm", "-v", f"{tmpDir}:/project",
+                      DOCKER_IMAGE, "--project", "/project", "--json"]
+        dockerArgs += _build_threshold_args(request.form)
+        if hasCdb:
+            dockerArgs += ["--cdb", "/project/compile_commands.json"]
+
+        result = _run_docker(dockerArgs)
+        return jsonify(result)
+    finally:
+        shutil.rmtree(tmpDir, ignore_errors=True)
 
 
 if __name__ == "__main__":

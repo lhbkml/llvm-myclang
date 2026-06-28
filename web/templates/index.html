@@ -10,23 +10,50 @@
     <div class="container">
         <header>
             <h1>myclang C 代码静态分析</h1>
-            <p class="subtitle">粘贴 C 代码，一键检查代码规范</p>
+            <p class="subtitle">12 项代码规范检查 + 项目级跨文件分析</p>
         </header>
 
         <main>
-            <!-- 左侧: 代码输入 -->
+            <!-- 左侧: 输入面板 -->
             <section class="input-panel">
-                <div class="panel-header">
-                    <h2>源代码</h2>
-                    <button id="sampleBtn" class="btn-sm">加载示例</button>
+                <!-- 模式切换 -->
+                <div class="mode-tabs">
+                    <button class="mode-btn active" data-mode="single">单文件分析</button>
+                    <button class="mode-btn" data-mode="project">项目分析</button>
                 </div>
-                <textarea id="codeInput" placeholder="在此粘贴 C 代码...&#10;&#10;int main() {&#10;    return 0;&#10;}" spellcheck="false"></textarea>
 
-                <!-- 阈值设置 -->
+                <!-- ===== 单文件模式 ===== -->
+                <div id="singleMode" class="mode-panel">
+                    <div class="panel-header">
+                        <h2>源代码</h2>
+                        <button id="sampleBtn" class="btn-sm">加载示例</button>
+                    </div>
+                    <textarea id="codeInput" placeholder="在此粘贴 C 代码...&#10;&#10;int main() {&#10;    return 0;&#10;}" spellcheck="false"></textarea>
+                </div>
+
+                <!-- ===== 项目模式 ===== -->
+                <div id="projectMode" class="mode-panel hidden">
+                    <h2>上传 C 源文件</h2>
+                    <div class="upload-zone" id="uploadZone">
+                        <span class="upload-icon">&#x1F4C2;</span>
+                        <p>拖拽 .c 文件到这里，或点击选择</p>
+                        <input type="file" id="fileInput" multiple accept=".c" hidden>
+                        <button id="selectFilesBtn" class="btn-sm">选择文件</button>
+                    </div>
+                    <div id="fileList" class="file-list"></div>
+
+                    <details class="cdb-section">
+                        <summary>compile_commands.json（可选）</summary>
+                        <input type="file" id="cdbInput" accept=".json">
+                        <p class="hint">上传 CMake/Bear 生成的编译数据库</p>
+                    </details>
+                </div>
+
+                <!-- 阈值设置（两种模式共用） -->
                 <details class="thresholds">
                     <summary>阈值设置（点击展开）</summary>
                     <div class="threshold-grid">
-                        <label>函数行数上限 <input type="number" id="maxLines" value="50" min="1"></label>
+                        <label>函数行数 <input type="number" id="maxLines" value="50" min="1"></label>
                         <label>单行长度 <input type="number" id="maxLineLength" value="100" min="1"></label>
                         <label>圈复杂度 <input type="number" id="maxCcn" value="10" min="1"></label>
                         <label>参数个数 <input type="number" id="maxParams" value="5" min="1"></label>
@@ -43,7 +70,7 @@
                 <div id="resultArea">
                     <div class="placeholder">
                         <span class="icon">&#x1F50D;</span>
-                        <p>在左侧输入代码，点击「开始分析」</p>
+                        <p id="placeholderText">在左侧输入代码，点击「开始分析」</p>
                     </div>
                 </div>
             </section>
