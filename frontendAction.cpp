@@ -27,9 +27,37 @@ JsonOutput("json", cl::desc("Output JSON instead of text report"));
 static cl::opt<bool>
 ReadFromStdin("stdin", cl::desc("Read source code from standard input"));
 
+static cl::opt<int>
+    MaxLines("max-lines", cl::desc("Maximum function lines (default 50)"),
+             cl::init(kDefaultThresholds.maxFunctionLines));
+
+static cl::opt<int>
+    MaxLineLength("max-line-length",
+                  cl::desc("Maximum line length in characters (default 100)"),
+                  cl::init(kDefaultThresholds.maxLineLength));
+
+static cl::opt<int>
+    MaxCCN("max-ccn", cl::desc("Maximum cyclomatic complexity (default 10)"),
+           cl::init(kDefaultThresholds.maxCCN));
+
+static cl::opt<int>
+    MaxParams("max-params", cl::desc("Maximum function parameters (default 5)"),
+              cl::init(kDefaultThresholds.maxParams));
+
+static cl::opt<int>
+    MaxNesting("max-nesting", cl::desc("Maximum nesting depth (default 4)"),
+               cl::init(kDefaultThresholds.maxNesting));
+
 // ====================== main ======================
 int main(int argc, char **argv) {
     cl::ParseCommandLineOptions(argc, argv, "Clang C File Analyzer\n");
+
+    Thresholds thresh;
+    thresh.maxFunctionLines = MaxLines;
+    thresh.maxLineLength    = MaxLineLength;
+    thresh.maxCCN           = MaxCCN;
+    thresh.maxParams        = MaxParams;
+    thresh.maxNesting       = MaxNesting;
 
     if (!ReadFromStdin && InputFiles.empty()) {
         std::cerr << "No input files\n";
@@ -61,9 +89,9 @@ int main(int argc, char **argv) {
             std::cerr << "No input from stdin\n";
             return 1;
         }
-        AnalysisResult result = analyzeSourceCode(code, "<stdin>", *Invocation);
+        AnalysisResult result = analyzeSourceCode(code, "<stdin>", *Invocation, thresh);
         if (JsonOutput) {
-            json::Value json = toJSON(result);
+            json::Value json = toJSON(result, thresh);
             if (auto *O = json.getAsObject())
                 jsonSet(*O, "files") = json::Array({"<stdin>"});
             outs() << formatv("{0:2}", json) << "\n";
@@ -72,7 +100,7 @@ int main(int argc, char **argv) {
                 for (const auto &e : result.errors)
                     std::cerr << "Error: " << e << "\n";
             }
-            printReport(result.stats, {"<stdin>"});
+            printReport(result.stats, {"<stdin>"}, thresh);
         }
         return result.success ? 0 : 1;
     }
@@ -82,7 +110,7 @@ int main(int argc, char **argv) {
     std::vector<std::string> succeeded;
     std::vector<std::string> allErrors;
     for (const auto &f : InputFiles) {
-        AnalysisResult result = analyzeFile(f, *Invocation);
+        AnalysisResult result = analyzeFile(f, *Invocation, thresh);
         if (result.success) {
             totalStats += result.stats;
             succeeded.push_back(f);
@@ -96,7 +124,7 @@ int main(int argc, char **argv) {
 
     if (succeeded.empty()) {
         if (JsonOutput) {
-            json::Value json = toJSON(totalStats);
+            json::Value json = toJSON(totalStats, thresh);
             if (auto *O = json.getAsObject()) {
                 jsonSet(*O, "files") = json::Array(succeeded);
                 jsonSet(*O, "errors") = json::Array(allErrors);
@@ -109,7 +137,7 @@ int main(int argc, char **argv) {
     }
 
     if (JsonOutput) {
-        json::Value json = toJSON(totalStats);
+        json::Value json = toJSON(totalStats, thresh);
         if (auto *O = json.getAsObject()) {
             jsonSet(*O, "files") = json::Array(succeeded);
             if (!allErrors.empty())
@@ -117,7 +145,7 @@ int main(int argc, char **argv) {
         }
         outs() << formatv("{0:2}", json) << "\n";
     } else {
-        printReport(totalStats, succeeded);
+        printReport(totalStats, succeeded, thresh);
     }
 
     return 0;

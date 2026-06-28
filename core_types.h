@@ -5,12 +5,23 @@
 #include <string>
 #include <vector>
 
-// ====================== 代码规范检查阈值 ======================
-static const int MAX_FUNCTION_LINES = 50;
-static const int MAX_LINE_LENGTH = 100;
-static const int MAX_CCN = 10;                           // 圈复杂度上限
-static const int MAX_PARAMS = 5;                          // 参数个数上限
-static const int MAX_NESTING = 4;                          // 嵌套深度上限
+// ====================== 可配置阈值 ======================
+struct Thresholds {
+    int maxFunctionLines = 50;
+    int maxLineLength    = 100;
+    int maxCCN           = 10;
+    int maxParams        = 5;
+    int maxNesting       = 4;
+};
+
+inline const Thresholds kDefaultThresholds{};
+
+// ====================== 代码规范检查阈值 (deprecated, 保留向后兼容) ======================
+static const int MAX_FUNCTION_LINES = kDefaultThresholds.maxFunctionLines;
+static const int MAX_LINE_LENGTH    = kDefaultThresholds.maxLineLength;
+static const int MAX_CCN            = kDefaultThresholds.maxCCN;
+static const int MAX_PARAMS         = kDefaultThresholds.maxParams;
+static const int MAX_NESTING        = kDefaultThresholds.maxNesting;
 
 // ====================== 记录型小结构 ======================
 

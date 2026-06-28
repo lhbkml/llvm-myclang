@@ -21,6 +21,7 @@ AnalysisResult runClangPipeline(CompilerInstance &CI,
                                 const CompilerInvocation &SharedInvocation,
                                 const std::string &FileName,
                                 const std::string &IncludeParentDir,
+                                const Thresholds &Thresh,
                                 IntrusiveRefCntPtr<vfs::FileSystem> VFS) {
     AnalysisResult result;
 
@@ -59,7 +60,7 @@ AnalysisResult runClangPipeline(CompilerInstance &CI,
     CI.createPreprocessor(TU_Complete);
 
     // AST 分析
-    CI.setASTConsumer(std::make_unique<MyASTConsumer>(result.stats));
+    CI.setASTConsumer(std::make_unique<MyASTConsumer>(result.stats, Thresh));
     CI.createASTContext();
     CI.createSema(TU_Complete, nullptr);
 
@@ -76,30 +77,32 @@ AnalysisResult runClangPipeline(CompilerInstance &CI,
 // ====================== 分析源码字符串 ======================
 AnalysisResult analyzeSourceCode(const std::string &Code,
                                  const std::string &FileName,
-                                 const CompilerInvocation &SharedInvocation) {
+                                 const CompilerInvocation &SharedInvocation,
+                                 const Thresholds &Thresh) {
     auto MemFS = llvm::makeIntrusiveRefCnt<vfs::InMemoryFileSystem>();
     MemFS->addFile(FileName, 0,
                    llvm::MemoryBuffer::getMemBuffer(Code, FileName));
 
     CompilerInstance CI;
 
-    AnalysisResult result = runClangPipeline(CI, SharedInvocation, FileName, "", MemFS);
+    AnalysisResult result = runClangPipeline(CI, SharedInvocation, FileName, "", Thresh, MemFS);
 
-    classifyLines(Code, FileName, result.stats);
+    classifyLines(Code, FileName, result.stats, Thresh);
 
     return result;
 }
 
 // ====================== 分析磁盘文件 ======================
 AnalysisResult analyzeFile(const std::string &FilePath,
-                           const CompilerInvocation &SharedInvocation) {
+                           const CompilerInvocation &SharedInvocation,
+                           const Thresholds &Thresh) {
     CompilerInstance CI;
 
     IntrusiveRefCntPtr<vfs::FileSystem> RealFS = vfs::getRealFileSystem();
 
     std::string ParentDir = llvm::sys::path::parent_path(FilePath).str();
 
-    AnalysisResult result = runClangPipeline(CI, SharedInvocation, FilePath, ParentDir, RealFS);
+    AnalysisResult result = runClangPipeline(CI, SharedInvocation, FilePath, ParentDir, Thresh, RealFS);
     if (!result.success && result.errors.size() == 1 &&
         result.errors[0].find("File not found:") == 0)
         return result;
@@ -108,7 +111,7 @@ AnalysisResult analyzeFile(const std::string &FilePath,
     if (src.is_open()) {
         std::string code((std::istreambuf_iterator<char>(src)),
                           std::istreambuf_iterator<char>());
-        classifyLines(code, FilePath, result.stats);
+        classifyLines(code, FilePath, result.stats, Thresh);
     }
 
     return result;

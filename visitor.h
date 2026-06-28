@@ -23,6 +23,7 @@ public:
     AnalysisStats &Stats;
     clang::SourceManager *SM = nullptr;
     clang::ASTContext *Ctx = nullptr;
+    const Thresholds &Thresh;
 
     // 当前正在遍历的函数（用于逐函数统计）
     FunctionStats *CurrentFunc = nullptr;
@@ -30,7 +31,7 @@ public:
     // 当前嵌套深度（if/for/while/do-while/switch）
     int currentDepth = 0;
 
-    explicit MyASTVisitor(AnalysisStats &S);
+    explicit MyASTVisitor(AnalysisStats &S, const Thresholds &T);
 
     // Traverse 覆写：跟踪嵌套深度
     bool TraverseIfStmt(clang::IfStmt *IS);
@@ -66,8 +67,9 @@ private:
 // ====================== 自定义 AST Consumer ======================
 class MyASTConsumer : public clang::ASTConsumer {
     AnalysisStats &Stats;
+    const Thresholds &Thresh;
 public:
-    explicit MyASTConsumer(AnalysisStats &S);
+    explicit MyASTConsumer(AnalysisStats &S, const Thresholds &T);
     void HandleTranslationUnit(clang::ASTContext &Context) override;
 };
 

@@ -30,7 +30,7 @@ void DiagCollector::HandleDiagnostic(DiagnosticsEngine::Level DiagLevel,
 
 // ====================== MyASTVisitor ======================
 
-MyASTVisitor::MyASTVisitor(AnalysisStats &S) : Stats(S) {}
+MyASTVisitor::MyASTVisitor(AnalysisStats &S, const Thresholds &T) : Stats(S), Thresh(T) {}
 
 bool MyASTVisitor::TraverseIfStmt(IfStmt *IS) {
     currentDepth++;
@@ -128,10 +128,10 @@ bool MyASTVisitor::TraverseFunctionDecl(FunctionDecl *FD) {
 
         FS.paramCount = FD->getNumParams();
 
-        if (FS.paramCount > MAX_PARAMS)
+        if (FS.paramCount > Thresh.maxParams)
             FS.hasTooManyParams = true;
 
-        if (FS.lines > MAX_FUNCTION_LINES)
+        if (FS.lines > Thresh.maxFunctionLines)
             FS.isOverlong = true;
 
         if (!isValidSnakeCase(FS.name))
@@ -158,7 +158,7 @@ bool MyASTVisitor::TraverseFunctionDecl(FunctionDecl *FD) {
             }
             FS.ccn = edges - nodes + 2;
             if (FS.ccn < 1) FS.ccn = 1;
-            if (FS.ccn > MAX_CCN) {
+            if (FS.ccn > Thresh.maxCCN) {
                 FS.isHighCCN = true;
                 Stats.highCCNFunctions++;
             }
@@ -253,7 +253,7 @@ bool MyASTVisitor::TraverseFunctionDecl(FunctionDecl *FD) {
         }
     }
 
-    if (CurrentFunc == &FS && FS.maxNesting > MAX_NESTING) {
+    if (CurrentFunc == &FS && FS.maxNesting > Thresh.maxNesting) {
         FS.hasDeepNesting = true;
         Stats.deepNestingFunctions++;
     }
@@ -439,10 +439,10 @@ bool MyASTVisitor::VisitCallExpr(CallExpr *CE) {
 
 // ====================== MyASTConsumer ======================
 
-MyASTConsumer::MyASTConsumer(AnalysisStats &S) : Stats(S) {}
+MyASTConsumer::MyASTConsumer(AnalysisStats &S, const Thresholds &T) : Stats(S), Thresh(T) {}
 
 void MyASTConsumer::HandleTranslationUnit(ASTContext &Context) {
-    MyASTVisitor Visitor(Stats);
+    MyASTVisitor Visitor(Stats, Thresh);
     Visitor.SM = &Context.getSourceManager();
     Visitor.Ctx = &Context;
     Visitor.TraverseDecl(Context.getTranslationUnitDecl());

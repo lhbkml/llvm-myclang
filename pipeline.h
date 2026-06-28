@@ -13,17 +13,20 @@ AnalysisResult runClangPipeline(
     const clang::CompilerInvocation &SharedInvocation,
     const std::string &FileName,
     const std::string &IncludeParentDir,
+    const Thresholds &Thresh,
     llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS = nullptr);
 
 // 分析内存源码字符串（程序化入口）
 AnalysisResult analyzeSourceCode(
     const std::string &Code,
     const std::string &FileName,
-    const clang::CompilerInvocation &SharedInvocation);
+    const clang::CompilerInvocation &SharedInvocation,
+    const Thresholds &Thresh);
 
 // 分析磁盘文件
 AnalysisResult analyzeFile(
     const std::string &FilePath,
-    const clang::CompilerInvocation &SharedInvocation);
+    const clang::CompilerInvocation &SharedInvocation,
+    const Thresholds &Thresh);
 
 #endif

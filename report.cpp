@@ -75,7 +75,7 @@ json::Value toJSON(const FunctionStats &F) {
     return O;
 }
 
-json::Value toJSON(const AnalysisStats &Stats) {
+json::Value toJSON(const AnalysisStats &Stats, const Thresholds &Thresh) {
     double avgCCN = 0;
     int maxCCN = 0;
     std::string maxCCNFunc;
@@ -191,13 +191,21 @@ json::Value toJSON(const AnalysisStats &Stats) {
              {"gotoCount", Stats.gotoCount},
          }},
         {"functions", json::Array(Stats.functions)},
+        {"thresholds",
+         json::Object{
+             {"maxFunctionLines", Thresh.maxFunctionLines},
+             {"maxLineLength", Thresh.maxLineLength},
+             {"maxCCN", Thresh.maxCCN},
+             {"maxParams", Thresh.maxParams},
+             {"maxNesting", Thresh.maxNesting},
+         }},
     };
 
     return Root;
 }
 
-json::Value toJSON(const AnalysisResult &R) {
-    json::Value json = toJSON(R.stats);
+json::Value toJSON(const AnalysisResult &R, const Thresholds &Thresh) {
+    json::Value json = toJSON(R.stats, Thresh);
     if (auto *O = json.getAsObject()) {
         if (!R.errors.empty())
             jsonSet(*O, "errors") = json::Array(R.errors);
@@ -211,7 +219,8 @@ json::Value toJSON(const AnalysisResult &R) {
 // ====================== 文本报告 ======================
 
 void printReport(const AnalysisStats &Stats,
-                 const std::vector<std::string> &Files) {
+                 const std::vector<std::string> &Files,
+                 const Thresholds &Thresh) {
     outs() << "\n";
     outs() << "========== C 源文件分析报告 ==========\n\n";
 
@@ -240,7 +249,7 @@ void printReport(const AnalysisStats &Stats,
 
     // 代码规范检查
     outs() << "【代码规范检查】\n";
-    outs() << "  函数行数上限(" << MAX_FUNCTION_LINES << "行): ";
+    outs() << "  函数行数上限(" << Thresh.maxFunctionLines << "行): ";
     if (Stats.overlongFunctions == 0) {
         outs() << "= 全部在限制内\n";
     } else {
@@ -248,7 +257,7 @@ void printReport(const AnalysisStats &Stats,
         for (const auto &F : Stats.functions) {
             if (F.isOverlong)
                 outs() << "    - " << F.name << "(): " << F.lines << " 行 (超标 "
-                        << (F.lines - MAX_FUNCTION_LINES) << " 行)\n";
+                        << (F.lines - Thresh.maxFunctionLines) << " 行)\n";
         }
     }
     outs() << "\n";
@@ -264,7 +273,7 @@ void printReport(const AnalysisStats &Stats,
         }
     }
 
-    outs() << "  函数参数上限(" << MAX_PARAMS << "个): ";
+    outs() << "  函数参数上限(" << Thresh.maxParams << "个): ";
     if (Stats.tooManyParamsFunctions == 0) {
         outs() << "= 全部在限制内\n";
     } else {
@@ -272,11 +281,11 @@ void printReport(const AnalysisStats &Stats,
         for (const auto &F : Stats.functions) {
             if (F.hasTooManyParams)
                 outs() << "    - " << F.name << "(): " << F.paramCount
-                       << " 个参数 (超标 " << (F.paramCount - MAX_PARAMS) << " 个)\n";
+                       << " 个参数 (超标 " << (F.paramCount - Thresh.maxParams) << " 个)\n";
         }
     }
 
-    outs() << "  嵌套深度上限(" << MAX_NESTING << "): ";
+    outs() << "  嵌套深度上限(" << Thresh.maxNesting << "): ";
     if (Stats.deepNestingFunctions == 0) {
         outs() << "= 全部在限制内\n";
     } else {
@@ -284,7 +293,7 @@ void printReport(const AnalysisStats &Stats,
         for (const auto &F : Stats.functions) {
             if (F.hasDeepNesting)
                 outs() << "    - " << F.name << "(): 最大嵌套 " << F.maxNesting
-                       << " 层 (超标 " << (F.maxNesting - MAX_NESTING) << " 层)\n";
+                       << " 层 (超标 " << (F.maxNesting - Thresh.maxNesting) << " 层)\n";
         }
     }
 
@@ -308,7 +317,7 @@ void printReport(const AnalysisStats &Stats,
             outs() << "    - " << name << " -> 应改为 g_" << name << "\n";
     }
 
-    outs() << "  单行长度(" << MAX_LINE_LENGTH << "字符): ";
+    outs() << "  单行长度(" << Thresh.maxLineLength << "字符): ";
     if (Stats.longLineCount == 0) {
         outs() << "= 全部在限制内\n";
     } else {
@@ -366,7 +375,7 @@ void printReport(const AnalysisStats &Stats,
             outs() << "    - " << B.funcName << "(): " << B.type << " 空块\n";
     }
 
-    outs() << "  圈复杂度上限(" << MAX_CCN << "): ";
+    outs() << "  圈复杂度上限(" << Thresh.maxCCN << "): ";
     if (Stats.highCCNFunctions == 0) {
         outs() << "= 全部在限制内\n";
     } else {
@@ -374,7 +383,7 @@ void printReport(const AnalysisStats &Stats,
         for (const auto &F : Stats.functions) {
             if (F.isHighCCN)
                 outs() << "    - " << F.name << "(): CCN=" << F.ccn
-                       << " (超标 " << (F.ccn - MAX_CCN) << ")\n";
+                       << " (超标 " << (F.ccn - Thresh.maxCCN) << ")\n";
         }
     }
 
@@ -489,7 +498,8 @@ void printReport(const AnalysisStats &Stats,
 
 void classifyLines(const std::string &SourceText,
                    const std::string &DisplayName,
-                   AnalysisStats &Stats) {
+                   AnalysisStats &Stats,
+                   const Thresholds &Thresh) {
     std::istringstream src(SourceText);
     std::string line;
     int lineNum = 0;
@@ -499,7 +509,7 @@ void classifyLines(const std::string &SourceText,
         int len = line.length();
         Stats.totalLines++;
 
-        if (len > MAX_LINE_LENGTH) {
+        if (len > Thresh.maxLineLength) {
             Stats.longLineCount++;
             Stats.longLines.push_back({DisplayName, lineNum, len});
         }
