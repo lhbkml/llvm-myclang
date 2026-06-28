@@ -59,15 +59,18 @@ static void collectCFiles(const std::string &Dir, std::vector<std::string> &File
     for (llvm::sys::fs::directory_iterator It(Dir, EC), End;
          It != End && !EC; It.increment(EC)) {
         if (EC) break;
+        // path() 在不同 LLVM 版本返回 StringRef 或 std::string，统一用 data()+size()
+        auto rawPath = It->path();
+        std::string Path(rawPath.data(), rawPath.size());
         llvm::sys::fs::file_status St;
-        if (llvm::sys::fs::status(It->path(), St)) continue;
+        if (llvm::sys::fs::status(Path, St)) continue;
         if (St.type() == llvm::sys::fs::file_type::regular_file) {
-            if (StringRef(It->path()).endswith(".c"))
-                Files.push_back(It->path().str());
+            if (StringRef(Path).endswith(".c"))
+                Files.push_back(Path);
         } else if (St.type() == llvm::sys::fs::file_type::directory_file) {
-            StringRef DirName = llvm::sys::path::filename(It->path());
+            StringRef DirName = llvm::sys::path::filename(Path);
             if (DirName != "." && DirName != "..")
-                collectCFiles(It->path().str(), Files);
+                collectCFiles(Path, Files);
         }
     }
 }
