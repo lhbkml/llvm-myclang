@@ -211,4 +211,22 @@ struct AnalysisResult {
     std::vector<std::string> warnings;  // Clang Warning 诊断
 };
 
+// ====================== 项目级跨文件分析 ======================
+struct ProjectReport {
+    // 函数名 → 定义所在文件
+    std::map<std::string, std::string> funcDefs;
+    // 函数名 → 所有定义文件（用于检测重复定义）
+    std::map<std::string, std::vector<std::string>> allDefs;
+    // 跨文件调用：caller@file → callee@file
+    std::vector<std::string> crossFileCalls;
+    // 调用但未定义（外部/库函数）
+    std::vector<std::string> undefinedRefs;
+    // 定义但从未被调用
+    std::vector<std::string> uncalledFuncs;
+    // 多文件重复定义
+    std::vector<std::string> duplicateFuncs;
+    // 调用总览：caller → callee 列表
+    std::map<std::string, std::vector<std::string>> callGraph;
+};
+
 #endif

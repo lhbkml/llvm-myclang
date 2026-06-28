@@ -31,4 +31,13 @@ void classifyLines(const std::string &SourceText,
                    AnalysisStats &Stats,
                    const Thresholds &Thresh);
 
+// ====================== 项目级跨文件分析 ======================
+ProjectReport buildProjectReport(
+    const std::vector<std::string> &Files,
+    const std::vector<AnalysisStats> &FileStats);
+
+void printProjectReport(const ProjectReport &PR);
+
+llvm::json::Value toJSON(const ProjectReport &PR);
+
 #endif

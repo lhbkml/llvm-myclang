@@ -276,6 +276,7 @@ int main(int argc, char **argv) {
         }
 
         AnalysisStats totalStats;
+        std::vector<AnalysisStats> perFileStats;
         std::vector<std::string> succeeded;
         std::vector<std::string> allErrors;
 
@@ -303,6 +304,7 @@ int main(int argc, char **argv) {
             AnalysisResult result = analyzeFile(f, *Invoke, thresh);
             if (result.success) {
                 totalStats += result.stats;
+                perFileStats.push_back(result.stats);
                 succeeded.push_back(f);
             } else {
                 std::cerr << "[FAIL] " << f << "\n";
@@ -337,11 +339,21 @@ int main(int argc, char **argv) {
                 jsonSet(*O, "project") = ProjectDir;
                 if (!allErrors.empty())
                     jsonSet(*O, "errors") = json::Array(allErrors);
+                // 跨文件分析
+                if (succeeded.size() > 1) {
+                    ProjectReport PR = buildProjectReport(succeeded, perFileStats);
+                    jsonSet(*O, "projectReport") = toJSON(PR);
+                }
             }
             outs() << formatv("{0:2}", json) << "\n";
         } else {
             outs() << "Project: " << ProjectDir << "\n";
             printReport(totalStats, succeeded, thresh);
+            // 跨文件分析
+            if (succeeded.size() > 1) {
+                ProjectReport PR = buildProjectReport(succeeded, perFileStats);
+                printProjectReport(PR);
+            }
         }
 
         return 0;

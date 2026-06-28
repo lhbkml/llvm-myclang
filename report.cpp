@@ -3,6 +3,7 @@
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <set>
 #include <sstream>
 
 using namespace llvm;
@@ -562,4 +563,174 @@ void classifyLines(const std::string &SourceText,
         if (!isComment)
             Stats.codeLines++;
     }
+}
+
+// ====================== 项目级跨文件分析 ======================
+
+ProjectReport buildProjectReport(
+    const std::vector<std::string> &Files,
+    const std::vector<AnalysisStats> &FileStats) {
+
+    ProjectReport PR;
+
+    // 1. 收集所有函数定义（函数名 → 文件）
+    for (size_t i = 0; i < Files.size() && i < FileStats.size(); ++i) {
+        for (const auto &F : FileStats[i].functions) {
+            if (!F.name.empty()) {
+                PR.allDefs[F.name].push_back(Files[i]);
+            }
+        }
+    }
+
+    // 单文件定义映射
+    for (const auto &P : PR.allDefs) {
+        if (P.second.size() == 1)
+            PR.funcDefs[P.first] = P.second[0];
+        else
+            PR.duplicateFuncs.push_back(P.first);
+    }
+
+    // 2. 收集所有函数调用，构建跨文件调用图
+    for (size_t i = 0; i < Files.size() && i < FileStats.size(); ++i) {
+        for (const auto &F : FileStats[i].functions) {
+            if (F.name.empty()) continue;
+            for (const auto &C : F.callTargets) {
+                if (C.first == "<indirect>") continue;
+                PR.callGraph[F.name].push_back(C.first);
+                // 跨文件调用
+                auto defIt = PR.funcDefs.find(C.first);
+                if (defIt != PR.funcDefs.end() && defIt->second != Files[i]) {
+                    std::string edge = F.name + "@" + Files[i] +
+                                       " → " + C.first + "@" + defIt->second;
+                    PR.crossFileCalls.push_back(edge);
+                }
+            }
+        }
+    }
+
+    // 3. 检测问题
+    std::set<std::string> calledSet;
+    for (const auto &P : PR.callGraph)
+        for (const auto &C : P.second)
+            calledSet.insert(C);
+
+    // 未定义引用：被调用但不在任何一个文件中定义
+    for (const auto &callee : calledSet) {
+        if (PR.allDefs.find(callee) == PR.allDefs.end())
+            PR.undefinedRefs.push_back(callee);
+    }
+
+    // 未被调用的函数：定义了但从未被调用
+    for (const auto &P : PR.allDefs) {
+        if (calledSet.find(P.first) == calledSet.end())
+            PR.uncalledFuncs.push_back(P.first);
+    }
+
+    return PR;
+}
+
+void printProjectReport(const ProjectReport &PR) {
+    outs() << "\n========== 跨文件分析报告 ==========\n\n";
+
+    outs() << "【函数定义统计】\n";
+    outs() << "  总函数定义数: " << PR.allDefs.size() << "\n";
+
+    // 跨文件调用
+    outs() << "\n【跨文件调用】\n";
+    if (PR.crossFileCalls.empty()) {
+        outs() << "  未发现跨文件调用\n";
+    } else {
+        outs() << "  共 " << PR.crossFileCalls.size() << " 处:\n";
+        for (const auto &s : PR.crossFileCalls)
+            outs() << "    " << s << "\n";
+    }
+
+    // 未定义引用
+    outs() << "\n【未定义引用（外部/库函数）】\n";
+    if (PR.undefinedRefs.empty()) {
+        outs() << "  未发现\n";
+    } else {
+        outs() << "  共 " << PR.undefinedRefs.size() << " 个:\n";
+        for (const auto &f : PR.undefinedRefs)
+            outs() << "    " << f << "()\n";
+    }
+
+    // 未被调用的函数
+    outs() << "\n【未被调用的函数】\n";
+    if (PR.uncalledFuncs.empty()) {
+        outs() << "  全部函数都有调用关系\n";
+    } else {
+        outs() << "  共 " << PR.uncalledFuncs.size() << " 个:\n";
+        for (const auto &f : PR.uncalledFuncs) {
+            auto it = PR.allDefs.find(f);
+            std::string loc = (it != PR.allDefs.end() && !it->second.empty())
+                              ? " (" + it->second[0] + ")" : "";
+            outs() << "    " << f << "()" << loc << "\n";
+        }
+    }
+
+    // 重复定义
+    outs() << "\n【多文件重复定义】\n";
+    if (PR.duplicateFuncs.empty()) {
+        outs() << "  未发现\n";
+    } else {
+        outs() << "  共 " << PR.duplicateFuncs.size() << " 个:\n";
+        for (const auto &f : PR.duplicateFuncs) {
+            auto it = PR.allDefs.find(f);
+            if (it != PR.allDefs.end()) {
+                outs() << "    " << f << "(): ";
+                for (size_t i = 0; i < it->second.size(); ++i) {
+                    if (i > 0) outs() << ", ";
+                    outs() << it->second[i];
+                }
+                outs() << "\n";
+            }
+        }
+    }
+
+    outs() << "\n========================================\n";
+}
+
+json::Value toJSON(const ProjectReport &PR) {
+    json::Object O;
+
+    O["totalFunctions"] = (int)PR.allDefs.size();
+    O["crossFileCalls"] = json::Array(PR.crossFileCalls);
+    O["undefinedRefs"] = json::Array(PR.undefinedRefs);
+
+    // uncalled functions with file info
+    std::vector<json::Value> uncalledItems;
+    for (const auto &f : PR.uncalledFuncs) {
+        auto it = PR.allDefs.find(f);
+        std::string file = (it != PR.allDefs.end() && !it->second.empty())
+                           ? it->second[0] : "";
+        uncalledItems.push_back(json::Object{{"name", f}, {"file", file}});
+    }
+    O["uncalledFuncs"] = json::Object{
+        {"count", (int)PR.uncalledFuncs.size()},
+        {"items", json::Array(uncalledItems)},
+    };
+
+    // duplicate definitions
+    std::vector<json::Value> dupItems;
+    for (const auto &f : PR.duplicateFuncs) {
+        auto it = PR.allDefs.find(f);
+        std::vector<std::string> locs;
+        if (it != PR.allDefs.end()) locs = it->second;
+        dupItems.push_back(json::Object{
+            {"name", f}, {"files", json::Array(locs)},
+        });
+    }
+    O["duplicateFuncs"] = json::Object{
+        {"count", (int)PR.duplicateFuncs.size()},
+        {"items", json::Array(dupItems)},
+    };
+
+    // call graph (key function → callees)
+    json::Object graphObj;
+    for (const auto &P : PR.callGraph)
+        graphObj[P.first] = json::Array(P.second);
+    O["callGraph"] = json::Value(std::move(graphObj));
+
+    return O;
 }
