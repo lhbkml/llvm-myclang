@@ -19,10 +19,12 @@ let currentMode = "single";
 // 项目模式元素
 const uploadZone = document.getElementById("uploadZone");
 const fileInput = document.getElementById("fileInput");
+const folderInput = document.getElementById("folderInput");
 const selectFilesBtn = document.getElementById("selectFilesBtn");
+const selectFolderBtn = document.getElementById("selectFolderBtn");
 const fileList = document.getElementById("fileList");
 const cdbInput = document.getElementById("cdbInput");
-let selectedFiles = [];
+let selectedFiles = [];   // {name, file, relativePath}
 
 // 阈值
 const thresholdMap = {
@@ -66,10 +68,29 @@ modeBtns.forEach(btn => {
 
 // ====================== 文件上传 ======================
 selectFilesBtn.addEventListener("click", () => fileInput.click());
+selectFolderBtn.addEventListener("click", () => folderInput.click());
 
 fileInput.addEventListener("change", () => {
-    selectedFiles = Array.from(fileInput.files).filter(f => f.name.endsWith(".c") || f.name.endsWith(".h"));
-    renderFileList();
+    const files = Array.from(fileInput.files)
+        .filter(f => f.name.endsWith(".c") || f.name.endsWith(".h"))
+        .map(f => ({ name: f.name, file: f, relativePath: f.name }));
+    if (files.length > 0) {
+        selectedFiles = [...selectedFiles, ...files];
+        renderFileList();
+    }
+    fileInput.value = "";
+});
+
+folderInput.addEventListener("change", () => {
+    // webkitdirectory 模式下，webkitRelativePath 包含相对路径
+    const files = Array.from(folderInput.files)
+        .filter(f => f.name.endsWith(".c") || f.name.endsWith(".h"))
+        .map(f => ({ name: f.webkitRelativePath || f.name, file: f, relativePath: f.webkitRelativePath || f.name }));
+    if (files.length > 0) {
+        selectedFiles = [...selectedFiles, ...files];
+        renderFileList();
+    }
+    folderInput.value = "";
 });
 
 uploadZone.addEventListener("dragover", e => { e.preventDefault(); uploadZone.classList.add("drag-over"); });
@@ -77,10 +98,46 @@ uploadZone.addEventListener("dragleave", () => uploadZone.classList.remove("drag
 uploadZone.addEventListener("drop", e => {
     e.preventDefault();
     uploadZone.classList.remove("drag-over");
-    const dropped = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith(".c") || f.name.endsWith(".h"));
-    if (dropped.length > 0) {
-        selectedFiles = [...selectedFiles, ...dropped];
-        renderFileList();
+    const items = Array.from(e.dataTransfer.items || []);
+    // 尝试从拖拽条目中递归获取文件（支持文件夹拖拽）
+    const dropped = [];
+    const processEntry = (entry) => {
+        return new Promise(resolve => {
+            if (entry.isFile) {
+                entry.file(file => {
+                    if (file.name.endsWith(".c") || file.name.endsWith(".h"))
+                        dropped.push({ name: entry.fullPath.replace(/^\//, ""), file, relativePath: entry.fullPath.replace(/^\//, "") });
+                    resolve();
+                });
+            } else if (entry.isDirectory) {
+                const reader = entry.createReader();
+                reader.readEntries(entries => {
+                    Promise.all(entries.map(processEntry)).then(resolve);
+                });
+            } else {
+                resolve();
+            }
+        });
+    };
+    if (items.length > 0) {
+        Promise.all(items.map(item => {
+            const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+            return entry ? processEntry(entry) : Promise.resolve();
+        })).then(() => {
+            if (dropped.length > 0) {
+                selectedFiles = [...selectedFiles, ...dropped];
+                renderFileList();
+            }
+        });
+    } else {
+        // 降级：不支持 webkitGetAsEntry 的浏览器
+        const files = Array.from(e.dataTransfer.files)
+            .filter(f => f.name.endsWith(".c") || f.name.endsWith(".h"))
+            .map(f => ({ name: f.name, file: f, relativePath: f.name }));
+        if (files.length > 0) {
+            selectedFiles = [...selectedFiles, ...files];
+            renderFileList();
+        }
     }
 });
 
@@ -128,7 +185,10 @@ async function runProjectAnalysis() {
     setLoading("正在上传并分析...");
     try {
         const formData = new FormData();
-        selectedFiles.forEach(f => formData.append("files", f));
+        selectedFiles.forEach(({file, relativePath}) => {
+            // 保留相对路径，后端据此重建目录结构
+            formData.append("files", file, relativePath);
+        });
         if (cdbInput.files.length > 0) formData.append("cdb", cdbInput.files[0]);
         addThresholdsToForm(formData);
 

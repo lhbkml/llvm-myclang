@@ -91,9 +91,18 @@ def analyze_project():
     tmpDir = tempfile.mkdtemp(prefix="myclang_")
     try:
         for f in srcFiles:
-            # 只保留文件名，避免路径穿越
-            safeName = os.path.basename(f.filename)
-            f.save(os.path.join(tmpDir, safeName))
+            # 保留前端传来的相对路径（支持子目录），同时防止路径穿越
+            relPath = f.filename.replace("\\", "/")
+            # 去掉开头的 / 和 .. 防止逃逸
+            while relPath.startswith("/"):
+                relPath = relPath[1:]
+            parts = [p for p in relPath.split("/") if p and p != ".."]
+            if not parts:
+                continue
+            safeRelPath = os.path.join(*parts)
+            destPath = os.path.join(tmpDir, safeRelPath)
+            os.makedirs(os.path.dirname(destPath), exist_ok=True)
+            f.save(destPath)
 
         # compile_commands.json
         cdbFile = request.files.get("cdb")
